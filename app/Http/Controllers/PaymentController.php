@@ -208,668 +208,244 @@ class PaymentController extends Controller
         return $order;
     }
 
-
-
-
-
-
-
-
-
-
-
     /**
-     * Redirect to 2Checkout Convert Plus with dynamic parameters
+     * Generate 2Checkout payment URL for Blade views
+     * This static method can be called directly from Blade templates
      */
-    public function convertPlusRedirect(QuoteRequest $quoteRequest)
+    public static function generatePaymentURL(QuoteRequest $quoteRequest)
     {
-        // Ensure customer can only pay for their own quotes
-        if ($quoteRequest->customer_id !== auth()->id()) {
-            abort(403);
-        }
-
-        // Check if quote is ready for payment
-        if ($quoteRequest->status !== 'quoted') {
-            return redirect()->route('quote-requests.show', $quoteRequest)
-                ->with('error', 'This quote is not ready for payment.');
-        }
-
-        // Generate signature for 2Checkout using JSON method
-        $signature = $this->generateJSONSignature($quoteRequest);
+        $merchantCode = config('services.twocheckout.account_number'); // 255036765830
+        $secretWord = config('services.twocheckout.secret_word'); // From TWOCHECKOUT_SECRET_WORD
         
-        // Clean product title for URL (same cleaning as in signature)
-        $cleanTitle = preg_replace('/[^a-zA-Z0-9\s]/', '', $quoteRequest->title);
-        $cleanTitle = trim($cleanTitle);
-        if (empty($cleanTitle)) {
-            $cleanTitle = 'Embroidery Product';
-        }
+        // Clean product title - using the same as your working example
+        $cleanTitle = 'Embroidery Digitize';
 
-        // Build 2Checkout URL - using secure.2checkout.com
-        $baseUrl = 'https://secure.2checkout.com/checkout/buy';
+        // Parameters that require signature (must be sorted alphabetically)
+        $currency = 'USD';
+        $price = (string)$quoteRequest->quoted_amount;
+        $qty = '1';
+        $type = 'digital';
         
-        $params = [
-            'merchant' => config('services.twocheckout.account_number'),
-            'currency' => 'USD',
-            'tpl' => 'default',
-            'dynamic' => '1',
-            'return-type' => 'redirect',
-            'return-url' => route('payment.thankyou'),
+        // Create signature following 2Checkout specification:
+        // 1. Extract signature-required parameters
+        // 2. Sort alphabetically: currency, price, prod, qty, type
+        // 3. Serialize values with length prefix
+        // 4. Concatenate and encrypt with HMAC SHA256
+        
+        $signatureParams = [
+            'currency' => $currency,
+            'price' => $price,
             'prod' => $cleanTitle,
-            'price' => $quoteRequest->quoted_amount,
-            'type' => 'digital',
-            'qty' => '1',
+            'qty' => $qty,
+            'type' => $type
         ];
         
-        // Add signature only if we have a valid secret key
-        $secretKey = config('services.twocheckout.secret_key');
-        if (!empty($secretKey)) {
-            $params['signature'] = $signature;
-        }
+        // Sort alphabetically by key
+        ksort($signatureParams);
         
-        // Add test parameter at the end
-        $params['test'] = '1';
-
-        $redirectUrl = $baseUrl . '?' . http_build_query($params);
-
-        Log::info('Redirecting to 2Checkout Convert Plus (JSON signature)', [
-            'quote_request_id' => $quoteRequest->id,
-            'amount' => $quoteRequest->quoted_amount,
-            'signature' => $signature,
-            'base_url' => $baseUrl,
-            'all_params' => $params,
-            'url' => $redirectUrl
-        ]);
-
-        // If we're getting blocked, provide an alternative approach
-        // Store the quote request ID in session for fallback
-        session(['payment_quote_request_id' => $quoteRequest->id]);
-
-        return redirect($redirectUrl);
-    }
-
-    /**
-     * Simple redirect without signature for testing
-     */
-    public function convertPlusSimple(QuoteRequest $quoteRequest)
-    {
-        // Ensure customer can only pay for their own quotes
-        if ($quoteRequest->customer_id !== auth()->id()) {
-            abort(403);
-        }
-
-        // Check if quote is ready for payment
-        if ($quoteRequest->status !== 'quoted') {
-            return redirect()->route('quote-requests.show', $quoteRequest)
-                ->with('error', 'This quote is not ready for payment.');
-        }
-
-        // Clean product title for URL
-        $cleanTitle = preg_replace('/[^a-zA-Z0-9\s]/', '', $quoteRequest->title);
-        $cleanTitle = trim($cleanTitle);
-        if (empty($cleanTitle)) {
-            $cleanTitle = 'Embroidery Product';
-        }
-
-        // Build simple 2Checkout URL without signature
-        $baseUrl = 'https://sandbox.2checkout.com/checkout/buy';
-        $params = [
-            'merchant' => config('services.twocheckout.account_number'),
-            'currency' => 'USD',
-            'prod' => $cleanTitle,
-            'price' => $quoteRequest->quoted_amount,
-            'qty' => '1',
-            'return-url' => route('payment.thankyou'),
-            'test' => '1'
-        ];
-
-        $redirectUrl = $baseUrl . '?' . http_build_query($params);
-
-        Log::info('Redirecting to 2Checkout Simple (no signature)', [
-            'quote_request_id' => $quoteRequest->id,
-            'amount' => $quoteRequest->quoted_amount,
-            'url' => $redirectUrl
-        ]);
-
-        session(['payment_quote_request_id' => $quoteRequest->id]);
-
-        return redirect($redirectUrl);
-    }
-
-    /**
-     * Convert Plus redirect using JSON signature method
-     */
-    public function convertPlusJSON(QuoteRequest $quoteRequest)
-    {
-        // Ensure customer can only pay for their own quotes
-        if ($quoteRequest->customer_id !== auth()->id()) {
-            abort(403);
-        }
-
-        // Check if quote is ready for payment
-        if ($quoteRequest->status !== 'quoted') {
-            return redirect()->route('quote-requests.show', $quoteRequest)
-                ->with('error', 'This quote is not ready for payment.');
-        }
-
-        // Generate JSON-based signature
-        $signature = $this->generateJSONSignature($quoteRequest);
-        
-        // Clean product title for URL
-        $cleanTitle = preg_replace('/[^a-zA-Z0-9\s]/', '', $quoteRequest->title);
-        $cleanTitle = trim($cleanTitle);
-        if (empty($cleanTitle)) {
-            $cleanTitle = 'Embroidery Product';
-        }
-
-        // Build 2Checkout URL using secure endpoint
-        $baseUrl = 'https://secure.2checkout.com/checkout/buy';
-        
-        $params = [
-            'merchant' => config('services.twocheckout.account_number'),
-            'currency' => 'USD',
-            'tpl' => 'default',
-            'dynamic' => '1',
-            'return-type' => 'redirect',
-            'return-url' => route('payment.thankyou'),
-            'prod' => $cleanTitle,
-            'price' => $quoteRequest->quoted_amount,
-            'type' => 'digital',
-            'qty' => '1',
-        ];
-        
-        // Add signature
-        if (!empty($signature)) {
-            $params['signature'] = $signature;
-        }
-        
-        // Add test parameter at the end
-        $params['test'] = '1';
-
-        $redirectUrl = $baseUrl . '?' . http_build_query($params);
-
-        Log::info('Redirecting to 2Checkout with JSON signature', [
-            'quote_request_id' => $quoteRequest->id,
-            'amount' => $quoteRequest->quoted_amount,
-            'signature' => $signature,
-            'url' => $redirectUrl
-        ]);
-
-        session(['payment_quote_request_id' => $quoteRequest->id]);
-
-        return redirect($redirectUrl);
-    }
-
-    /**
-     * Generate signature for 2Checkout Convert Plus
-     * Following official documentation: https://knowledgecenter.2checkout.com/Documentation/07Checkout_Options/Conversion_Plus/01Generating_a_Conversion_Plus_Buy_Link/01Using_Buy_Link_Parameters#ConvertPlus_signature
-     */
-    private function generateConvertPlusSignature(QuoteRequest $quoteRequest)
-    {
-        $secretKey = config('services.twocheckout.secret_key');
-        
-        // Ensure we have a secret key
-        if (empty($secretKey)) {
-            Log::warning('No secret key configured for 2Checkout');
-            return '';
-        }
-        
-        // Clean the product title to avoid special characters
-        $cleanTitle = preg_replace('/[^a-zA-Z0-9\s]/', '', $quoteRequest->title);
-        $cleanTitle = trim($cleanTitle);
-        if (empty($cleanTitle)) {
-            $cleanTitle = 'Embroidery Product';
-        }
-        
-        // Parameters that require signature for ConvertPlus according to documentation
-        // Only include parameters that require signature based on your example URL
-        $params = [
-            'currency' => 'USD',
-            'dynamic' => '1',
-            'price' => (string)$quoteRequest->quoted_amount,
-            'prod' => $cleanTitle,
-            'qty' => '1',
-            'type' => 'digital'
-        ];
-        
-        // Sort parameters alphabetically (required by 2Checkout)
-        ksort($params);
-        
-        // Serialize each parameter value according to 2Checkout specification:
-        // Prepend the byte length of the value to the value itself
+        // Serialize each value (prepend length)
         $serializedValues = [];
-        foreach ($params as $key => $value) {
-            $valueStr = (string)$value;
-            // Get byte length (UTF-8 byte count)
-            $byteLength = strlen($valueStr);
-            $serialized = $byteLength . $valueStr;
-            $serializedValues[] = $serialized;
-            
-            Log::debug("Serializing parameter", [
-                'key' => $key,
-                'value' => $valueStr,
-                'byte_length' => $byteLength,
-                'serialized' => $serialized
-            ]);
+        foreach ($signatureParams as $key => $value) {
+            $serializedValues[] = strlen($value) . $value;
         }
         
         // Concatenate all serialized values
-        $concatenated = implode('', $serializedValues);
+        $dataToSign = implode('', $serializedValues);
         
-        // Generate HMAC SHA256 signature using the secret key
-        $signature = hash_hmac('sha256', $concatenated, $secretKey);
+        // Generate HMAC SHA256 signature
+        $signature = hash_hmac('sha256', $dataToSign, $secretWord);
 
-        Log::info('Generated Convert Plus signature', [
-            'quote_request_id' => $quoteRequest->id,
-            'original_title' => $quoteRequest->title,
-            'clean_title' => $cleanTitle,
-            'signature_params' => $params,
-            'serialized_values' => $serializedValues,
-            'concatenated_string' => $concatenated,
-            'concatenated_length' => strlen($concatenated),
-            'secret_key_length' => strlen($secretKey),
-            'final_signature' => $signature
-        ]);
-
-        return $signature;
-    }
-
-    /**
-     * Generate signature using JSON stringify approach (like Node.js example)
-     */
-    private function generateJSONSignature(QuoteRequest $quoteRequest)
-    {
-        $secretKey = config('services.twocheckout.secret_key');
-        
-        if (empty($secretKey)) {
-            Log::warning('No secret key configured for JSON signature');
-            return '';
-        }
-        
-        // Create payload exactly like the Node.js example
-        $payload = [
-            'merchant' => config('services.twocheckout.account_number'),
-            'currency' => 'USD',
-            'amount' => number_format($quoteRequest->quoted_amount, 2, '.', '')
-        ];
-        
-        // Generate signature using JSON stringify + HMAC SHA256 + base64
-        $jsonString = json_encode($payload, JSON_UNESCAPED_SLASHES);
-        $hmacHash = hash_hmac('sha256', $jsonString, $secretKey, true);
-        $signature = base64_encode($hmacHash);
-        
-        Log::info('Generated JSON signature (Node.js style)', [
-            'quote_request_id' => $quoteRequest->id,
-            'payload' => $payload,
-            'json_string' => $jsonString,
-            'secret_key_length' => strlen($secretKey),
-            'signature' => $signature
-        ]);
-        
-        return $signature;
-    }
-
-    /**
-     * Generate direct 2Checkout URL for use in templates
-     * This can be called directly without redirecting through controller
-     */
-    public static function generateDirectPaymentURL(QuoteRequest $quoteRequest)
-    {
-        $secretKey = config('services.twocheckout.secret_key');
-        
-        // Clean product title for URL
-        $cleanTitle = preg_replace('/[^a-zA-Z0-9\s]/', '', $quoteRequest->title);
-        $cleanTitle = trim($cleanTitle);
-        if (empty($cleanTitle)) {
-            $cleanTitle = 'Embroidery Product';
-        }
-
-        // Generate JSON signature
-        $signature = '';
-        if (!empty($secretKey)) {
-            $payload = [
-                'merchant' => config('services.twocheckout.account_number'),
-                'currency' => 'USD',
-                'amount' => number_format($quoteRequest->quoted_amount, 2, '.', '')
-            ];
-            
-            $jsonString = json_encode($payload, JSON_UNESCAPED_SLASHES);
-            $hmacHash = hash_hmac('sha256', $jsonString, $secretKey, true);
-            $signature = base64_encode($hmacHash);
-        }
-
-        // Build 2Checkout URL parameters
-        $baseUrl = 'https://secure.2checkout.com/checkout/buy';
-        
+        // ConvertPlus parameters - fixed for proper cart loading
         $params = [
-            'merchant' => config('services.twocheckout.account_number'),
-            'currency' => 'USD',
-            'tpl' => 'default',
+            // Required parameters
+            'merchant' => $merchantCode,
+            'currency' => $currency,
             'dynamic' => '1',
-            'return-type' => 'redirect',
-            'return-url' => route('payment.thankyou'),
             'prod' => $cleanTitle,
-            'price' => $quoteRequest->quoted_amount,
-            'type' => 'digital',
-            'qty' => '1',
+            'price' => $price,
+            'type' => $type,
+            'qty' => $qty,
+            'signature' => $signature,
+            
+            // Cart behavior - Fixed
+            'tpl' => 'default',
+            'return-url' => 'https://embroiderydigitize.com/thank-you/',
+            'return-type' => 'redirect',
+            
+            // Customer information pre-fill
+            'name' => $quoteRequest->customer->name,
+            'email' => $quoteRequest->customer->email,
+            'phone' => $quoteRequest->customer->phone ?? '',
+            
+            // Order tracking
+            'order-ext-ref' => 'QUOTE-' . $quoteRequest->id,
+            'customer-ext-ref' => 'CUSTOMER-' . $quoteRequest->customer_id,
+            'src' => 'quote-acceptance',
+            
+            // Additional product information
+            'description' => 'Embroidery digitization service for: ' . ($quoteRequest->title ?? 'Custom Design'),
+            'tangible' => '0', // Digital product
+            
+            // Cart settings - Fixed to load cart properly
+            'language' => 'en'
+            // Removed 'empty-cart' => '1' and 'test' => '1' as they cause cart issues
         ];
-        
-        // Add signature if available
-        if (!empty($signature)) {
-            $params['signature'] = $signature;
-        }
-        
-        // Add test parameter at the end
-        $params['test'] = '1';
 
+        // Build final URL
+        $baseUrl = 'https://secure.2checkout.com/checkout/buy';
         return $baseUrl . '?' . http_build_query($params);
     }
 
     /**
-     * Generate 2Checkout ConvertPlus payload for JavaScript SDK
+     * Payment waiting/verification page
      */
-    public function generateConvertPlusPayload(QuoteRequest $quoteRequest)
+    public function paymentWaiting(Request $request, $quoteId)
     {
-        // Ensure customer can only pay for their own quotes
-        if ($quoteRequest->customer_id !== auth()->id()) {
-            return response()->json(['error' => 'Unauthorized'], 403);
-        }
+        $quoteRequest = QuoteRequest::where('id', $quoteId)
+                                  ->where('customer_id', auth()->id())
+                                  ->firstOrFail();
 
-        // Check if quote is ready for payment
-        if ($quoteRequest->status !== 'quoted') {
-            return response()->json(['error' => 'Quote not ready for payment'], 400);
-        }
-
-        $secretKey = config('services.twocheckout.secret_key');
-        $sellerId = config('services.twocheckout.account_number');
-        
-        // Clean product title
-        $cleanTitle = preg_replace('/[^a-zA-Z0-9\s]/', '', $quoteRequest->title);
-        $cleanTitle = trim($cleanTitle);
-        if (empty($cleanTitle)) {
-            $cleanTitle = 'Embroidery Product';
-        }
-
-        // Create the payload for ConvertPlus
-        $payload = [
-            'sellerId' => $sellerId,
-            'publishableKey' => config('services.twocheckout.publishable_key'),
-            'ccTokenId' => '',
-            'billingAddr' => [
-                'name' => auth()->user()->name,
-                'addrLine1' => '',
-                'city' => '',
-                'state' => '',
-                'zipCode' => '',
-                'country' => 'US',
-                'email' => auth()->user()->email
-            ],
-            'shippingAddr' => [
-                'name' => auth()->user()->name,
-                'addrLine1' => '',
-                'city' => '',
-                'state' => '',
-                'zipCode' => '',
-                'country' => 'US'
-            ],
-            'dynamicDescriptor' => 'Embroidery Service',
-            'chargeAmount' => $quoteRequest->quoted_amount,
-            'currency' => 'USD',
-            'scaCompliant' => false,
-            'paymentMethod' => [
-                'type' => 'EES_TOKEN_PAYMENT'
-            ],
-            'customer' => [
-                'email' => auth()->user()->email,
-                'phone' => auth()->user()->phone ?? ''
-            ]
-        ];
-
-        // Generate signature for ConvertPlus
-        $signature = '';
-        if (!empty($secretKey)) {
-            // For ConvertPlus, we sign the JSON payload
-            $jsonString = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-            $hmacHash = hash_hmac('sha256', $jsonString, $secretKey, true);
-            $signature = base64_encode($hmacHash);
-        }
-
-        Log::info('Generated ConvertPlus payload', [
-            'quote_request_id' => $quoteRequest->id,
-            'payload' => $payload,
-            'signature' => $signature
-        ]);
-
-        return response()->json([
-            'payload' => $payload,
-            'signature' => $signature,
-            'sellerId' => $sellerId
-        ]);
-    }
-
-    /**
-     * Generate ConvertPlus URL with signature for direct redirect
-     */
-    public function generateConvertPlusURL(QuoteRequest $quoteRequest)
-    {
-        // Ensure customer can only pay for their own quotes
-        if ($quoteRequest->customer_id !== auth()->id()) {
-            return response()->json(['error' => 'Unauthorized'], 403);
-        }
-
-        // Check if quote is ready for payment
-        if ($quoteRequest->status !== 'quoted') {
-            return response()->json(['error' => 'Quote not ready for payment'], 400);
-        }
-
-        $merchantCode = config('services.twocheckout.account_number');
-        $secretWord = config('services.twocheckout.secret_key'); // Using secret_key as secret word
-        
-        // Clean product title
-        $cleanTitle = preg_replace('/[^a-zA-Z0-9\s]/', '', $quoteRequest->title);
-        $cleanTitle = trim($cleanTitle);
-        if (empty($cleanTitle)) {
-            $cleanTitle = 'Embroidery Product';
-        }
-
-        // ConvertPlus parameters
-        $params = [
-            'merchant' => $merchantCode,
-            'currency' => 'USD',
-            'tpl' => 'default',
-            'dynamic' => '1',
-            'return-type' => 'redirect',
-            'return-url' => route('payment.thankyou'),
-            'prod' => $cleanTitle,
-            'price' => number_format($quoteRequest->quoted_amount, 2, '.', ''),
-            'type' => 'digital',
-            'qty' => '1',
-            'test' => '1'
-        ];
-
-        // Generate signature for ConvertPlus
-        $signature = '';
-        if (!empty($secretWord)) {
-            // Create parameters that need to be signed (alphabetically sorted)
-            $signatureParams = [
-                'currency' => $params['currency'],
-                'dynamic' => $params['dynamic'],
-                'price' => $params['price'],
-                'prod' => $params['prod'],
-                'qty' => $params['qty'],
-                'type' => $params['type']
-            ];
-            
-            ksort($signatureParams);
-            
-            // Serialize parameters (prepend length to each value)
-            $serializedValues = [];
-            foreach ($signatureParams as $key => $value) {
-                $valueStr = (string)$value;
-                $length = strlen($valueStr);
-                $serializedValues[] = $length . $valueStr;
-            }
-            
-            // Concatenate and generate HMAC SHA256
-            $concatenated = implode('', $serializedValues);
-            $signature = hash_hmac('sha256', $concatenated, $secretWord);
-            
-            // Add signature to parameters
-            $params['signature'] = $signature;
-        }
-
-        // Build final URL
-        $baseUrl = 'https://secure.2checkout.com/checkout/buy';
-        $url = $baseUrl . '?' . http_build_query($params);
-
-        Log::info('Generated ConvertPlus URL with signature', [
-            'quote_request_id' => $quoteRequest->id,
-            'merchant' => $merchantCode,
-            'amount' => $params['price'],
-            'signature_params' => $signatureParams ?? [],
-            'signature' => $signature,
-            'url' => $url
-        ]);
-
-        return response()->json([
-            'url' => $url,
-            'signature' => $signature,
-            'amount' => $params['price']
-        ]);
-    }
-
-    /**
-     * Thank you page after payment - verify payment status
-     */
-    public function thankYou(Request $request)
-    {
-        Log::info('Payment thank you page accessed', [
+        Log::info('Payment waiting page accessed', [
+            'quote_request_id' => $quoteId,
             'user_id' => auth()->id(),
             'query_params' => $request->all()
         ]);
 
-        // Get payment parameters from 2Checkout
+        // Check if we have payment confirmation parameters from 2Checkout
         $orderNumber = $request->get('order_number');
         $invoiceId = $request->get('invoice_id');
-        
-        if (!$orderNumber || !$invoiceId) {
-            return view('payments.thank-you', [
-                'status' => 'error',
-                'message' => 'Payment verification failed - missing parameters.'
+        $key = $request->get('key');
+
+        if ($orderNumber && $invoiceId) {
+            // Process the successful payment
+            $this->processPaymentCallback($quoteRequest, $request->all());
+            
+            return view('payments.waiting', [
+                'quoteRequest' => $quoteRequest,
+                'status' => 'processing',
+                'message' => 'Payment received! We are processing your order.',
+                'orderNumber' => $orderNumber,
+                'invoiceId' => $invoiceId
             ]);
         }
 
+        // If no payment parameters, show waiting page
+        return view('payments.waiting', [
+            'quoteRequest' => $quoteRequest,
+            'status' => 'waiting',
+            'message' => 'Waiting for payment confirmation...',
+        ]);
+    }
+
+    /**
+     * Thank You page after 2Checkout payment
+     */
+    public function thankYou(Request $request)
+    {
         try {
-            // Verify payment with 2Checkout API
-            $paymentStatus = $this->verify2CheckoutPayment($orderNumber, $invoiceId);
-            
-            if ($paymentStatus === 'COMPLETE') {
-                // Find the quote request based on product name or order reference
-                $quoteRequest = $this->findQuoteFromPayment($request);
-                
-                if ($quoteRequest) {
-                    // Create order and update quote status
-                    $this->processSuccessfulPayment($quoteRequest, $orderNumber, $invoiceId);
-                    
-                    return view('payments.thank-you', [
-                        'status' => 'success',
-                        'message' => 'Payment completed successfully! Your order has been created.',
-                        'quote_request' => $quoteRequest
-                    ]);
-                }
+            Log::info('Thank you page accessed', [
+                'query_params' => $request->all(),
+                'user_id' => auth()->id() ?? 'guest'
+            ]);
+
+            // Get parameters from 2Checkout return URL
+            $orderNumber = $request->get('order_number');
+            $invoiceId = $request->get('invoice_id');
+            $merchantOrderId = $request->get('merchant_order_id');
+            $total = $request->get('total');
+            $key = $request->get('key');
+
+            // If we have payment parameters, find the quote request
+            $quoteRequest = null;
+            if ($merchantOrderId) {
+                $quoteRequest = QuoteRequest::find($merchantOrderId);
             }
+
+            // Return the thank you page with the parameters
+            // The webhook will handle the actual order creation
+            return view('payments.thank-you', [
+                'orderNumber' => $orderNumber,
+                'invoiceId' => $invoiceId,
+                'merchantOrderId' => $merchantOrderId,
+                'total' => $total,
+                'key' => $key,
+                'quoteRequest' => $quoteRequest,
+                'hasPaymentData' => !empty($orderNumber) && !empty($invoiceId)
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Thank you page error: ' . $e->getMessage(), [
+                'request_data' => $request->all()
+            ]);
             
             return view('payments.thank-you', [
-                'status' => 'pending',
-                'message' => 'Payment is being processed. Please check your email for updates.'
+                'hasPaymentData' => false,
+                'error' => 'Unable to process payment information'
             ]);
+        }
+    }
+
+    /**
+     * Process payment callback from 2Checkout
+     */
+    private function processPaymentCallback(QuoteRequest $quoteRequest, array $paymentData)
+    {
+        try {
+            // Create or update payment record
+            $payment = Payment::updateOrCreate([
+                'quote_request_id' => $quoteRequest->id,
+            ], [
+                'customer_id' => $quoteRequest->customer_id,
+                'payment_id' => $paymentData['order_number'] ?? $paymentData['invoice_id'] ?? 'PENDING',
+                'amount' => $quoteRequest->quoted_amount,
+                'currency' => 'USD',
+                'payment_method' => 'card',
+                'status' => 'completed',
+                'payment_data' => json_encode($paymentData),
+                'paid_at' => now()
+            ]);
+
+            // Update quote request status
+            $quoteRequest->update([
+                'status' => 'accepted',
+                'responded_at' => now()
+            ]);
+
+            // Create order
+            $order = Order::create([
+                'customer_id' => $quoteRequest->customer_id,
+                'quote_request_id' => $quoteRequest->id,
+                'payment_id' => $payment->id,
+                'order_number' => 'ORD-' . time() . '-' . $quoteRequest->id,
+                'title' => $quoteRequest->title ?: 'Embroidery Order',
+                'status' => 'pending',
+                'instructions' => $quoteRequest->instructions,
+                'total_amount' => $quoteRequest->quoted_amount,
+                'delivery_days' => $quoteRequest->delivery_days,
+                'original_files' => $quoteRequest->files,
+                'due_date' => now()->addDays($quoteRequest->delivery_days ?: 7),
+                'amount' => $quoteRequest->quoted_amount
+            ]);
+
+            Log::info('Order created from payment callback', [
+                'quote_request_id' => $quoteRequest->id,
+                'order_id' => $order->id,
+                'payment_id' => $payment->id,
+                'order_number' => $order->order_number
+            ]);
+
+            // Associate order with quote request
+            $quoteRequest->update(['order_id' => $order->id]);
+
+            return $order;
             
         } catch (\Exception $e) {
-            Log::error('Payment verification failed', [
-                'order_number' => $orderNumber,
-                'invoice_id' => $invoiceId,
-                'error' => $e->getMessage()
+            Log::error('Payment callback processing failed', [
+                'quote_request_id' => $quoteRequest->id,
+                'error' => $e->getMessage(),
+                'payment_data' => $paymentData
             ]);
-            
-            return view('payments.thank-you', [
-                'status' => 'error',
-                'message' => 'Payment verification failed. Please contact support.'
-            ]);
+            throw $e;
         }
-    }
-
-    /**
-     * Verify payment status with 2Checkout API
-     */
-    private function verify2CheckoutPayment($orderNumber, $invoiceId)
-    {
-        // This would integrate with 2Checkout's API to verify payment
-        // For now, return COMPLETE for testing
-        return 'COMPLETE';
-    }
-
-    /**
-     * Find quote request from payment parameters
-     */
-    private function findQuoteFromPayment(Request $request)
-    {
-        // Try to find quote request from product name or other parameters
-        $productName = $request->get('prod');
-        
-        if ($productName) {
-            return QuoteRequest::where('title', urldecode($productName))
-                             ->where('customer_id', auth()->id())
-                             ->where('status', 'quoted')
-                             ->first();
-        }
-        
-        return null;
-    }
-
-    /**
-     * Process successful payment and create order
-     */
-    private function processSuccessfulPayment(QuoteRequest $quoteRequest, $orderNumber, $invoiceId)
-    {
-        // Create or update payment record
-        $payment = Payment::updateOrCreate([
-            'quote_request_id' => $quoteRequest->id,
-        ], [
-            'customer_id' => $quoteRequest->customer_id,
-            'payment_id' => $orderNumber,
-            'amount' => $quoteRequest->quoted_amount,
-            'currency' => 'USD',
-            'payment_method' => 'card',
-            'status' => 'completed',
-            'payment_data' => json_encode([
-                'order_number' => $orderNumber,
-                'invoice_id' => $invoiceId,
-                'provider' => '2checkout'
-            ])
-        ]);
-
-        // Update quote request status
-        $quoteRequest->update(['status' => 'accepted']);
-
-        // Create order
-        $order = Order::create([
-            'customer_id' => $quoteRequest->customer_id,
-            'quote_request_id' => $quoteRequest->id,
-            'payment_id' => $payment->id,
-            'order_number' => 'ORD-' . time() . '-' . $quoteRequest->id,
-            'status' => 'pending',
-            'instructions' => $quoteRequest->instructions,
-            'total_amount' => $quoteRequest->quoted_amount,
-            'delivery_days' => $quoteRequest->delivery_days,
-            'original_files' => $quoteRequest->files,
-        ]);
-
-        Log::info('Order created from Convert Plus payment', [
-            'quote_request_id' => $quoteRequest->id,
-            'order_id' => $order->id,
-            'payment_id' => $payment->id,
-            'order_number' => $orderNumber
-        ]);
-
-        return $order;
     }
 }

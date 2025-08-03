@@ -50,20 +50,7 @@ Route::middleware('auth')->group(function () {
     Route::get('/orders/{order}/original-files/{fileIndex}', [OrderController::class, 'downloadOriginalFile'])->name('orders.download-original-file');
     
     // Payment routes (for customers)
-    Route::get('/payments/{quoteRequest}/initiate', [PaymentController::class, 'initiatePayment'])->name('payment.initiate');
-    Route::get('/payments/{quoteRequest}/convertplus', [PaymentController::class, 'convertPlusRedirect'])->name('payment.convertplus');
-    Route::get('/payments/{quoteRequest}/convertplus-simple', [PaymentController::class, 'convertPlusSimple'])->name('payment.convertplus.simple');
-    Route::get('/payments/{quoteRequest}/convertplus-json', [PaymentController::class, 'convertPlusJSON'])->name('payment.convertplus.json');
-    Route::post('/payments/{quoteRequest}/convertplus-payload', [PaymentController::class, 'generateConvertPlusPayload'])->name('payment.convertplus.payload');
-    Route::post('/payments/{quoteRequest}/convertplus-url', [PaymentController::class, 'generateConvertPlusURL'])->name('payment.convertplus.url');
-    Route::get('/payments/thank-you', [PaymentController::class, 'thankYou'])->name('payment.thankyou');
-    Route::post('/payments/{payment}/process', [PaymentController::class, 'processPayment'])->name('payment.process');
-    Route::post('/payments/{quoteRequest}/process-token', [PaymentController::class, 'processToken'])->name('payment.process.token');
-    Route::post('/payments/{quoteRequest}/process-popup', [PaymentController::class, 'processPopup'])->name('payment.process.popup');
-    Route::post('/payments/{quoteRequest}/process-inline', [PaymentController::class, 'processInline'])->name('payment.process.inline');
-    Route::get('/payments/{payment}/status', [PaymentController::class, 'status'])->name('payment.status');
-    Route::get('/payments/{quoteRequest}/success', [PaymentController::class, 'paymentSuccess'])->name('payment.success');
-    Route::post('/payments/{quoteRequest}/mock', [PaymentController::class, 'mockPayment'])->name('payment.mock');
+    Route::get('/payments/{quote}/waiting', [PaymentController::class, 'paymentWaiting'])->name('payment.waiting');
     
     // Invoice routes (for customers)
     Route::get('/invoices', [InvoiceController::class, 'index'])->name('invoices.index');
@@ -109,100 +96,7 @@ Route::middleware(['auth', 'admin'])->prefix('admin')->name('admin.')->group(fun
 // Public webhook route (no authentication required)
 Route::post('/payments/webhook', [PaymentController::class, 'webhook'])->name('payment.webhook');
 
-// 2Checkout URL Test Page
-Route::get('/test-2checkout-urls', function () {
-    return view('test-2checkout-urls');
-})->name('test.2checkout.urls');
-
-// 2Checkout Inline Checkout Test
-Route::get('/test-inline-checkout', function () {
-    return view('test-2checkout-inline');
-})->name('test.inline.checkout');
-
-// 2Checkout InLine Checkout Test (updated)
-Route::get('/test-2checkout-inline', function () {
-    return view('test-2checkout-inline');
-})->name('test.2checkout.inline');
-
-// 2Checkout Locked Cart Test
-Route::get('/test-2checkout-locked', function () {
-    return view('test-2checkout-locked');
-})->name('test.2checkout.locked');
-
-// Webhook test route (for debugging)
-Route::get('/test-webhook', function() {
-    return response()->json([
-        'webhook_url' => route('payment.webhook'),
-        'webhook_method' => 'POST',
-        'environment' => app()->environment(),
-        'timestamp' => now()->toISOString()
-    ]);
-})->name('test.webhook');
-
-// Signature test route (for debugging different signature methods)
-Route::get('/test-signature/{quoteRequestId}', function($quoteRequestId) {
-    $quoteRequest = \App\Models\QuoteRequest::findOrFail($quoteRequestId);
-    $secretKey = config('services.twocheckout.secret_key');
-    
-    // Method 1: ConvertPlus official method (current implementation)
-    $cleanTitle = preg_replace('/[^a-zA-Z0-9\s]/', '', $quoteRequest->title);
-    $cleanTitle = trim($cleanTitle) ?: 'Embroidery Product';
-    
-    $params = [
-        'currency' => 'USD',
-        'dynamic' => '1',
-        'price' => (string)$quoteRequest->quoted_amount,
-        'prod' => $cleanTitle,
-        'qty' => '1',
-        'type' => 'digital'
-    ];
-    ksort($params);
-    
-    $serializedValues = [];
-    foreach ($params as $key => $value) {
-        $valueStr = (string)$value;
-        $byteLength = strlen($valueStr);
-        $serializedValues[] = $byteLength . $valueStr;
-    }
-    $concatenated = implode('', $serializedValues);
-    $signature1 = hash_hmac('sha256', $concatenated, $secretKey);
-    
-    // Method 2: JSON stringify approach (like your Node.js example)
-    $payload = [
-        'merchant' => config('services.twocheckout.account_number'),
-        'currency' => 'USD',
-        'amount' => $quoteRequest->quoted_amount
-    ];
-    $signature2 = base64_encode(hash_hmac('sha256', json_encode($payload), $secretKey, true));
-    
-    // Method 3: Simple concatenation
-    $simpleString = $params['currency'] . $params['dynamic'] . $params['price'] . $params['prod'] . $params['qty'] . $params['type'];
-    $signature3 = hash_hmac('sha256', $simpleString, $secretKey);
-    
-    return response()->json([
-        'quote_request_id' => $quoteRequest->id,
-        'amount' => $quoteRequest->quoted_amount,
-        'title' => $quoteRequest->title,
-        'clean_title' => $cleanTitle,
-        'secret_key_length' => strlen($secretKey),
-        'methods' => [
-            'convertplus_official' => [
-                'params' => $params,
-                'serialized' => $serializedValues,
-                'concatenated' => $concatenated,
-                'signature' => $signature1
-            ],
-            'json_stringify' => [
-                'payload' => $payload,
-                'json' => json_encode($payload),
-                'signature' => $signature2
-            ],
-            'simple_concat' => [
-                'string' => $simpleString,
-                'signature' => $signature3
-            ]
-        ]
-    ]);
-})->name('test.signature');
+// Public thank you page (no authentication required)
+Route::get('/thank-you', [PaymentController::class, 'thankYou'])->name('payment.thank-you');
 
 

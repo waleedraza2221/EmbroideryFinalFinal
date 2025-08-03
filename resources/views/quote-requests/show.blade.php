@@ -176,10 +176,10 @@
                         <!-- Payment Options -->
                         <div class="space-y-3">
                             <!-- Accept Quote & Pay Button -->
-                            <button onclick="acceptQuoteAndPay({{ $quoteRequest->id }})" 
-                                   class="w-full bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition inline-block text-center font-semibold">
+                            <a href="{{ \App\Http\Controllers\PaymentController::generatePaymentURL($quoteRequest) }}" 
+                               class="w-full bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition inline-block text-center font-semibold">
                                 Accept Quote & Pay ${{ number_format($quoteRequest->quoted_amount, 2) }}
-                            </button>
+                            </a>
                         </div>
                         
                         <p class="text-xs text-gray-500 text-center mt-4">
@@ -207,47 +207,4 @@
         </div>
     </div>
 </div>
-
-@if($quoteRequest->isQuoted())
-<!-- 2Checkout ConvertPlus -->
-<script>
-    function acceptQuoteAndPay(quoteRequestId) {
-        // Show loading state
-        const button = event.target;
-        const originalText = button.textContent;
-        button.textContent = 'Processing...';
-        button.disabled = true;
-
-        // Generate the ConvertPlus URL with signature and redirect directly
-        fetch(`/payments/${quoteRequestId}/convertplus-url`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').getAttribute('content')
-            }
-        })
-        .then(response => response.json())
-        .then(data => {
-            console.log('2Checkout URL generated:', data);
-            
-            if (data.error) {
-                alert('Error: ' + data.error);
-                return;
-            }
-
-            // Redirect to 2Checkout ConvertPlus page
-            window.location.href = data.url;
-        })
-        .catch(err => {
-            console.error('2Checkout error:', err);
-            alert('Payment initialization failed. Please try again.');
-            
-            // Restore button state
-            button.textContent = originalText;
-            button.disabled = false;
-        });
-    }
-</script>
-@endif
-
 @endsection
