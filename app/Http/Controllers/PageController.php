@@ -12,4 +12,5 @@ class PageController extends Controller
     public function serviceEmbroidery(){ return view('static.services.embroidery-digitizing'); }
     public function serviceStitchEstimator(){ return view('static.services.stitch-estimator'); }
     public function serviceVectorTracing(){ return view('static.services.vector-tracing'); }
+    public function serviceFormatConverter(){ return view('static.services.format-converter'); }
 }

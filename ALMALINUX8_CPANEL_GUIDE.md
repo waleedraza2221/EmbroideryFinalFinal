@@ -31,9 +31,51 @@ Complete step-by-step guide for deploying your Laravel Embroidery Management Sys
 ssh root@your-vps-ip-address
 ```
 
-#### Run the AlmaLinux deployment script:
+#### Get and run the AlmaLinux deployment script:
+
+**Method 1: Clone Repository (Recommended)**
 ```bash
-wget https://raw.githubusercontent.com/waleedraza2221/EmbroideryFinalFinal/main/almalinux8-cpanel-deploy.sh
+git clone https://github.com/waleedraza2221/EmbroideryFinalFinal.git
+cd EmbroideryFinalFinal
+chmod +x almalinux8-cpanel-deploy.sh
+./almalinux8-cpanel-deploy.sh
+```
+
+**Method 2: Create Script Manually (If git clone fails)**
+```bash
+cat > almalinux8-cpanel-deploy.sh << 'EOF'
+#!/bin/bash
+# Laravel Deployment Script for AlmaLinux 8 with cPanel
+set -e
+echo "🚀 Starting Laravel Embroidery Application Deployment..."
+
+# Update system packages
+dnf update -y
+dnf install -y epel-release
+dnf groupinstall -y "Development Tools"
+dnf install -y cmake git wget curl
+
+# Install PHP PostgreSQL extensions
+dnf install -y ea-php82-php-gd ea-php82-php-mbstring ea-php82-php-xml ea-php82-php-bcmath ea-php82-php-zip ea-php82-php-pgsql ea-php82-php-pdo_pgsql
+
+# Install Composer
+curl -sS https://getcomposer.org/installer | php
+mv composer.phar /usr/local/bin/composer
+chmod +x /usr/local/bin/composer
+
+# Install libembroidery
+cd /tmp
+rm -rf libembroidery
+git clone https://github.com/Embroidermodder/libembroidery.git
+cd libembroidery
+mkdir build && cd build
+cmake .. && make && make install
+echo "/usr/local/lib" > /etc/ld.so.conf.d/libembroidery.conf
+ldconfig
+
+echo "✅ Server setup completed! Follow the manual steps in the guide."
+EOF
+
 chmod +x almalinux8-cpanel-deploy.sh
 ./almalinux8-cpanel-deploy.sh
 ```
@@ -140,12 +182,14 @@ ssh username@your-vps-ip
 # Navigate to public_html
 cd public_html
 
-# Clone your repository
+# Clone your repository (public repository, no authentication needed)
 git clone https://github.com/waleedraza2221/EmbroideryFinalFinal.git .
 
 # Install dependencies
 composer install --optimize-autoloader --no-dev
 ```
+
+**Note**: If git clone fails due to authentication, use Method A (cPanel File Manager) instead.
 
 ### Step 6: Laravel Configuration
 

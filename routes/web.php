@@ -28,6 +28,15 @@ Route::prefix('services')->name('services.')->group(function(){
     Route::get('/embroidery-digitizing', [PageController::class,'serviceEmbroidery'])->name('embroidery');
     Route::get('/stitch-estimator', [PageController::class,'serviceStitchEstimator'])->name('stitch');
     Route::get('/vector-tracing', [PageController::class,'serviceVectorTracing'])->name('vector');
+    Route::get('/format-converter', [PageController::class,'serviceFormatConverter'])->name('converter');
+});
+
+// API routes for embroidery converter
+Route::prefix('api/converter')->group(function(){
+    Route::post('/convert', [App\Http\Controllers\Api\EmbroideryConverterController::class, 'convert'])->name('api.converter.convert');
+    Route::get('/download/{downloadId}', [App\Http\Controllers\Api\EmbroideryConverterController::class, 'download'])->name('api.converter.download');
+    Route::get('/formats', [App\Http\Controllers\Api\EmbroideryConverterController::class, 'getSupportedFormats'])->name('api.converter.formats');
+    Route::delete('/cleanup', [App\Http\Controllers\Api\EmbroideryConverterController::class, 'cleanup'])->name('api.converter.cleanup');
 });
 
 // Newsletter

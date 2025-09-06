@@ -185,36 +185,52 @@ class EmbroideryConverterController extends Controller
     }
 
     /**
-     * Perform the actual conversion using libembroidery
+     * Perform the actual conversion using PyEmbroidery
      */
     private function performConversion($inputPath, $outputPath, $inputFormat, $outputFormat)
     {
         try {
-            // Check if libembroidery is available
-            $libembroideryPath = $this->getLibembroideryPath();
+            // Get Python script path
+            $scriptPath = base_path('scripts/convert_embroidery.py');
             
-            if (!$libembroideryPath) {
+            if (!file_exists($scriptPath)) {
                 return [
                     'success' => false,
-                    'error' => 'Libembroidery not found. Please install libembroidery.'
+                    'error' => 'Conversion script not found.'
+                ];
+            }
+
+            // Check if Python is available
+            $pythonCommand = $this->getPythonCommand();
+            if (!$pythonCommand) {
+                return [
+                    'success' => false,
+                    'error' => 'Python3 not found. Please install Python 3 and PyEmbroidery.'
                 ];
             }
 
             // Build the conversion command
             $command = sprintf(
-                '"%s" "%s" "%s"',
-                $libembroideryPath,
+                '%s "%s" "%s" "%s"',
+                $pythonCommand,
+                $scriptPath,
                 $inputPath,
                 $outputPath
             );
 
-            // Execute the conversion
+            // Execute the conversion with timeout
             $output = [];
             $returnCode = 0;
-            exec($command . ' 2>&1', $output, $returnCode);
+            
+            // Add timeout to prevent hanging
+            $timeoutCommand = PHP_OS_FAMILY === 'Windows' 
+                ? $command 
+                : "timeout 300 $command";
+                
+            exec($timeoutCommand . ' 2>&1', $output, $returnCode);
 
             if ($returnCode !== 0) {
-                Log::error('Libembroidery conversion failed', [
+                Log::error('PyEmbroidery conversion failed', [
                     'command' => $command,
                     'return_code' => $returnCode,
                     'output' => implode("\n", $output)
@@ -225,6 +241,12 @@ class EmbroideryConverterController extends Controller
                     'error' => 'Conversion failed: ' . implode(' ', $output)
                 ];
             }
+
+            Log::info('PyEmbroidery conversion successful', [
+                'input_format' => $inputFormat,
+                'output_format' => $outputFormat,
+                'output' => implode("\n", $output)
+            ]);
 
             return ['success' => true];
 
@@ -237,30 +259,33 @@ class EmbroideryConverterController extends Controller
     }
 
     /**
-     * Get libembroidery executable path
+     * Get Python command for the system
      */
-    private function getLibembroideryPath()
+    private function getPythonCommand()
     {
-        // Check common installation paths
-        $possiblePaths = [
-            '/usr/local/bin/libembroidery-convert',
-            '/usr/bin/libembroidery-convert',
-            'C:\Program Files\libembroidery\libembroidery-convert.exe',
-            'libembroidery-convert', // If in PATH
-        ];
+        // Check common Python commands
+        $possibleCommands = ['python3', 'python'];
 
-        foreach ($possiblePaths as $path) {
-            if (is_executable($path)) {
-                return $path;
+        foreach ($possibleCommands as $cmd) {
+            // Check if command exists and can run
+            $testCommand = PHP_OS_FAMILY === 'Windows' 
+                ? "where $cmd >nul 2>&1" 
+                : "which $cmd >/dev/null 2>&1";
+                
+            $output = [];
+            $returnCode = 0;
+            exec($testCommand, $output, $returnCode);
+            
+            if ($returnCode === 0) {
+                // Verify it's Python 3
+                exec("$cmd --version 2>&1", $versionOutput, $versionCode);
+                if ($versionCode === 0 && !empty($versionOutput)) {
+                    $version = implode(' ', $versionOutput);
+                    if (strpos(strtolower($version), 'python 3') !== false) {
+                        return $cmd;
+                    }
+                }
             }
-        }
-
-        // Check if it's in PATH
-        $which = PHP_OS_FAMILY === 'Windows' ? 'where' : 'which';
-        exec("$which libembroidery-convert 2>/dev/null", $output, $returnCode);
-        
-        if ($returnCode === 0 && !empty($output[0])) {
-            return trim($output[0]);
         }
 
         return null;

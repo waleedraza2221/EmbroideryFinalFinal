@@ -100,6 +100,15 @@
                                         <div class="text-xs text-gray-500">High-quality vector conversion</div>
                                     </div>
                                 </a>
+                                <a href="{{ route('services.converter') }}" class="flex items-center px-4 py-3 hover:bg-indigo-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 transition-colors">
+                                    <div class="w-8 h-8 bg-indigo-100 dark:bg-indigo-900 rounded-lg flex items-center justify-center mr-3">
+                                        <span class="text-indigo-600 dark:text-indigo-400 text-sm">🔄</span>
+                                    </div>
+                                    <div>
+                                        <div class="font-medium">Format Converter</div>
+                                        <div class="text-xs text-gray-500">Convert between formats</div>
+                                    </div>
+                                </a>
                             </div>
                         </div>
                     </div>
@@ -163,6 +172,7 @@
                             <a @click="open=false" href="{{ route('services.embroidery') }}" class="block pl-6 pr-3 py-2 mobile-link text-sm">Embroidery Digitizing</a>
                             <a @click="open=false" href="{{ route('services.stitch') }}" class="block pl-6 pr-3 py-2 mobile-link text-sm">Stitch Estimator</a>
                             <a @click="open=false" href="{{ route('services.vector') }}" class="block pl-6 pr-3 py-2 mobile-link text-sm">Vector Tracing</a>
+                            <a @click="open=false" href="{{ route('services.converter') }}" class="block pl-6 pr-3 py-2 mobile-link text-sm">Format Converter</a>
                         </div>
                     </div>
                     

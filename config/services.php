@@ -53,4 +53,10 @@ return [
     'ca_bundle' => env('TWOCHECKOUT_CA_BUNDLE'), // absolute path to cacert.pem if needed
     'auth_mode' => env('TWOCHECKOUT_AUTH_MODE', 'basic'), // basic | hmac
     ],
+
+    'embroidery_api' => [
+        'url' => env('EMBROIDERY_API_URL', 'http://162.0.236.226'),
+        'key' => env('EMBROIDERY_API_KEY', '9097332919794dea83dd2de22191ec913a1b8f44'),
+        'timeout' => env('EMBROIDERY_API_TIMEOUT', 300),
+    ],
 ];
