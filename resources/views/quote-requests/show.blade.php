@@ -1,4 +1,4 @@
-@extends('layouts.app')
+@extends('layouts.dashboard')
 
 @section('title', 'Quote Request Details')
 
@@ -172,16 +172,11 @@
                 @if($quoteRequest->isQuoted())
                     <div class="bg-white rounded-lg shadow-md p-6">
                         <h3 class="text-lg font-semibold text-gray-800 mb-4">Actions</h3>
-                        
-                        <!-- Payment Options -->
                         <div class="space-y-3">
-                            <!-- Accept Quote & Pay Button -->
-                            <a href="{{ \App\Http\Controllers\PaymentController::generatePaymentURL($quoteRequest) }}" 
-                               class="w-full bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition inline-block text-center font-semibold">
+                            <a id="pay-now-inline" data-amount="{{ $quoteRequest->quoted_amount }}" class="w-full bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition inline-block text-center font-semibold">
                                 Accept Quote & Pay ${{ number_format($quoteRequest->quoted_amount, 2) }}
                             </a>
                         </div>
-                        
                         <p class="text-xs text-gray-500 text-center mt-4">
                             Secure payment processing by 2Checkout
                         </p>
@@ -208,3 +203,136 @@
     </div>
 </div>
 @endsection
+
+@push('scripts')
+@if($quoteRequest->isQuoted())
+<script src="https://secure.2checkout.com/checkout/client/twoCoInlineCart.js"></script>
+<script>
+(function(){
+  const btn = document.querySelector('#pay-now-inline');
+  if(!btn) return;
+  btn.addEventListener('click', function(e){
+    e.preventDefault();
+    try {
+      const rawAmount = parseFloat(btn.getAttribute('data-amount')) || 0;
+      const amount = (rawAmount % 1 === 0) ? String(parseInt(rawAmount,10)) : rawAmount.toFixed(2);
+      let productName = @json(preg_replace('/[^A-Za-z0-9 ]+/', ' ', $quoteRequest->title ?: 'Digitizing Service'));
+      productName = (productName || 'Digitizing Service').trim() || 'Digitizing Service';
+
+      if(typeof TwoCoInlineCart === 'undefined') {
+        alert('Payment library failed to load. Please retry.');
+        return;
+      }
+
+      // ---- 2Checkout / Verifone Inline Cart Initialization ----
+      const merchantCode = @json((config('services.twocheckout.account_number') ?? env('TWOCHECKOUT_ACCOUNT_NUMBER')));
+      if(!merchantCode){
+        console.error('Missing merchant code (TWOCHECKOUT_ACCOUNT_NUMBER).');
+        alert('Payment temporarily unavailable.');
+        return;
+      }
+      TwoCoInlineCart.setup.setMerchant(merchantCode);
+      TwoCoInlineCart.setup.setMode('DYNAMIC');
+      // Optional: Pre-load iframe faster (immediate | delayed)
+      // TwoCoInlineCart.setup.setIframeLoad('immediate');
+
+      // Register services (since we only loaded the library script, not the full CP snippet)
+      if(typeof TwoCoInlineCart.register === 'function') {
+        TwoCoInlineCart.register();
+      }
+
+      // Reset previous cart state to avoid stale sessions when navigating across quotes
+      if(TwoCoInlineCart.cart && typeof TwoCoInlineCart.cart.setReset === 'function') {
+        TwoCoInlineCart.cart.setReset(true);
+      }
+
+      // Currency
+      TwoCoInlineCart.cart.setCurrency('USD');
+
+      // Remove previous products (safety)
+      TwoCoInlineCart.products.removeAll();
+
+      // Add dynamic product
+      TwoCoInlineCart.products.add({
+        type: 'PRODUCT',
+        name: productName,
+        price: amount,
+        quantity: '1',
+        tangible: false
+      });
+
+      // Set external references to reconcile later server-side
+      if(TwoCoInlineCart.cart.setOrderExternalRef){
+        TwoCoInlineCart.cart.setOrderExternalRef('QUOTE-' + @json($quoteRequest->id));
+      }
+      if(TwoCoInlineCart.cart.setCustomerReference && @json(auth()->id())){
+        TwoCoInlineCart.cart.setCustomerReference('USER-' + @json(auth()->id()));
+      }
+
+      // Prefill billing (non-sensitive identification only)
+      @if(auth()->check())
+        if(TwoCoInlineCart.billing){
+          const billing = TwoCoInlineCart.billing;
+          billing.setName(@json(auth()->user()->name));
+          billing.setEmail(@json(auth()->user()->email));
+          @if(auth()->user()->phone ?? false)
+            billing.setPhone(@json(preg_replace('/\D+/', '', auth()->user()->phone)));
+          @endif
+          // Auto advance if all mandatory data set
+          if(TwoCoInlineCart.cart.setAutoAdvance){
+            TwoCoInlineCart.cart.setAutoAdvance(true);
+          }
+        }
+      @endif
+
+      // Return method after successful payment (you should implement signature / webhook validation server-side)
+            const returnUrl = new URL(@json(url('/thank-you')));
+            returnUrl.searchParams.set('quote_id', @json($quoteRequest->id));
+            returnUrl.searchParams.set('refnoext', 'QUOTE-' + @json($quoteRequest->id));
+            TwoCoInlineCart.cart.setReturnMethod({
+                type: 'redirect',
+                url: returnUrl.toString()
+            });
+
+      // Subscribe to events to trigger backend acknowledgment
+      if(TwoCoInlineCart.events && typeof TwoCoInlineCart.events.subscribe === 'function') {
+        const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content');
+        TwoCoInlineCart.events.subscribe('payment:finalized', function(data){
+          // Send lightweight notification to server (implement route & verification separately)
+          fetch(@json(route('payments.inline.finalized', [], false)), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-CSRF-TOKEN': csrfToken
+            },
+            body: JSON.stringify({
+              quote_id: @json($quoteRequest->id),
+              order_external_ref: 'QUOTE-' + @json($quoteRequest->id),
+              user_id: @json(auth()->id()),
+              payment_event: 'payment:finalized',
+              payload: data || null
+            })
+          }).catch(err=>console.warn('Finalize callback failed', err));
+        });
+      }
+
+      // Sandbox / Test mode
+      @if(config('services.twocheckout.sandbox'))
+        if(TwoCoInlineCart.cart.setTest){
+          TwoCoInlineCart.cart.setTest(true);
+        }
+      @endif
+
+      // Start checkout
+    try { if(window.localStorage){ localStorage.setItem('last_quote_id', String(@json($quoteRequest->id))); } } catch(e){}
+      TwoCoInlineCart.cart.checkout();
+
+    } catch(err){
+      console.error('Inline cart error', err);
+      alert('Unable to start checkout.');
+    }
+  });
+})();
+</script>
+@endif
+@endpush

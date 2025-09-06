@@ -46,6 +46,14 @@ class Payment extends Model
     }
 
     /**
+     * Get the order associated with this payment
+     */
+    public function order()
+    {
+        return $this->belongsTo(Order::class);
+    }
+
+    /**
      * Check if payment is completed
      */
     public function isCompleted()

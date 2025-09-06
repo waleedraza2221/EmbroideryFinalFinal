@@ -7,6 +7,7 @@ use App\Models\Order;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use App\Notifications\CustomerOrderDelivered;
 
 class OrderController extends Controller
 {
@@ -102,6 +103,12 @@ class OrderController extends Controller
             'delivery_notes' => $request->delivery_notes,
             'delivered_at' => now()
         ]);
+
+        // Notify customer
+        $customer = $order->customer; 
+        if($customer){
+            $customer->notify(new CustomerOrderDelivered($order->id, $order->title));
+        }
 
         return redirect()->route('admin.orders.show', $order)
             ->with('success', 'Order delivered successfully! Customer has been notified.');

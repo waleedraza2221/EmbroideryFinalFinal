@@ -12,11 +12,29 @@ use App\Http\Controllers\Admin\QuoteRequestController as AdminQuoteRequestContro
 use App\Http\Controllers\Admin\OrderController as AdminOrderController;
 use App\Http\Controllers\Admin\InvoiceController as AdminInvoiceController;
 use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\HomeController;
+use App\Http\Controllers\NewsletterController;
+use App\Http\Controllers\PageController;
+use App\Models\Testimonial;
 
 // Public routes
-Route::get('/', function () {
-    return view('welcome');
-})->name('home');
+// Root route: also accepts POST to gracefully handle legacy 2Checkout IPN hitting '/?wc-api=2checkout_ipn_inline'
+Route::match(['GET','POST'], '/', [HomeController::class, 'index'])->name('home');
+
+// Static marketing pages
+Route::get('/about', [PageController::class,'about'])->name('about');
+Route::get('/contact', [PageController::class,'contact'])->name('contact');
+Route::prefix('services')->name('services.')->group(function(){
+    Route::get('/embroidery-digitizing', [PageController::class,'serviceEmbroidery'])->name('embroidery');
+    Route::get('/stitch-estimator', [PageController::class,'serviceStitchEstimator'])->name('stitch');
+    Route::get('/vector-tracing', [PageController::class,'serviceVectorTracing'])->name('vector');
+});
+
+// Newsletter
+Route::post('/newsletter/subscribe', [NewsletterController::class,'subscribe'])->name('newsletter.subscribe');
+Route::post('/newsletter/unsubscribe', [NewsletterController::class,'unsubscribe'])->name('newsletter.unsubscribe');
+Route::get('/newsletter/confirm/{token}', [NewsletterController::class,'confirm'])->name('newsletter.confirm');
+
 
 // Authentication routes
 Route::middleware('guest')->group(function () {
@@ -49,14 +67,25 @@ Route::middleware('auth')->group(function () {
     Route::get('/orders/{order}/delivery-files/{fileIndex}', [OrderController::class, 'downloadDeliveryFile'])->name('orders.download-delivery-file');
     Route::get('/orders/{order}/original-files/{fileIndex}', [OrderController::class, 'downloadOriginalFile'])->name('orders.download-original-file');
     
-    // Payment routes (for customers)
-    Route::get('/payments/{quote}/waiting', [PaymentController::class, 'paymentWaiting'])->name('payment.waiting');
+    // Payment inline finalize (AJAX)
+    Route::post('/payments/inline/finalized', [PaymentController::class, 'inlineFinalized'])->name('payments.inline.finalized');
     
     // Invoice routes (for customers)
     Route::get('/invoices', [InvoiceController::class, 'index'])->name('invoices.index');
     Route::get('/invoices/{invoice}', [InvoiceController::class, 'show'])->name('invoices.show');
     Route::get('/invoices/{invoice}/download/{format?}', [InvoiceController::class, 'download'])->name('invoices.download');
     Route::get('/invoices/export/{format?}', [InvoiceController::class, 'exportAll'])->name('invoices.export');
+    
+    // Notification routes
+    Route::post('/notifications/{notification}/read', function($notification){
+        $n = auth()->user()->notifications()->where('id',$notification)->firstOrFail();
+        if(!$n->read_at){ $n->read_at = now(); $n->save(); }
+        return back();
+    })->name('notifications.markRead');
+    Route::post('/notifications/read-all', function(){
+        auth()->user()->unreadNotifications->each(function($n){ $n->read_at = now(); $n->save(); });
+        return back();
+    })->name('notifications.markAllRead');
 });
 
 // Admin routes (protected)
@@ -91,12 +120,17 @@ Route::middleware(['auth', 'admin'])->prefix('admin')->name('admin.')->group(fun
     Route::get('/invoices/export/{format?}', [AdminInvoiceController::class, 'exportAll'])->name('invoices.export');
     Route::post('/invoices/bulk-export/{format?}', [AdminInvoiceController::class, 'bulkExport'])->name('invoices.bulk-export');
     Route::put('/invoices/{invoice}/status', [AdminInvoiceController::class, 'updateStatus'])->name('invoices.update-status');
+
+    // Testimonials CRUD
+    Route::resource('testimonials', \App\Http\Controllers\Admin\TestimonialController::class)->except(['show']);
 });
 
 // Public webhook route (no authentication required)
 Route::post('/payments/webhook', [PaymentController::class, 'webhook'])->name('payment.webhook');
-
+// Authenticated (non-admin) order status proxy (kept outside admin group)
+Route::get('/payments/order-status', [PaymentController::class, 'orderStatusProxy'])->middleware('auth')->name('payments.order-status');
+// Complete payment & create order/invoice (called after external status COMPLETE)
+Route::post('/payments/complete-from-client', [PaymentController::class, 'completeFromClient'])->middleware('auth')->name('payments.complete-from-client');
 // Public thank you page (no authentication required)
 Route::get('/thank-you', [PaymentController::class, 'thankYou'])->name('payment.thank-you');
-
 

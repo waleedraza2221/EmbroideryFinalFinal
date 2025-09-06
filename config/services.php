@@ -48,5 +48,9 @@ return [
         'sandbox' => env('TWOCHECKOUT_SANDBOX', true),
         'currency' => env('TWOCHECKOUT_CURRENCY', 'USD'),
         'secret_word' => env('TWOCHECKOUT_SECRET_WORD'),
+        'api_base' => env('TWOCHECKOUT_API_BASE', 'https://api.2checkout.com/rest/6.0'),
+    'verify_ssl' => env('TWOCHECKOUT_VERIFY_SSL', true),
+    'ca_bundle' => env('TWOCHECKOUT_CA_BUNDLE'), // absolute path to cacert.pem if needed
+    'auth_mode' => env('TWOCHECKOUT_AUTH_MODE', 'basic'), // basic | hmac
     ],
 ];

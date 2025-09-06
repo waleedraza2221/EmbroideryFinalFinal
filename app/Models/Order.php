@@ -52,9 +52,15 @@ class Order extends Model
                 $order->order_number = 'ORD-' . str_pad($nextNumber, 6, '0', STR_PAD_LEFT);
             }
             
-            // Calculate due date
-            if (empty($order->due_date) && $order->delivery_days) {
-                $order->due_date = Carbon::now()->addDays($order->delivery_days);
+            // Ensure delivery_days defaults to 1 (24 hours)
+            if (empty($order->delivery_days)) {
+                $order->delivery_days = 1;
+            }
+            
+            // Calculate due date - always set to 24 hours from now as minimum
+            if (empty($order->due_date)) {
+                $deliveryDays = max(1, $order->delivery_days); // Minimum 1 day (24 hours)
+                $order->due_date = Carbon::now()->addDays($deliveryDays);
             }
         });
     }

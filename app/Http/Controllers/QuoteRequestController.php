@@ -5,6 +5,9 @@ namespace App\Http\Controllers;
 use App\Models\QuoteRequest;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
+use App\Models\User;
+use App\Notifications\AdminQuoteRequested;
+use App\Notifications\AdminQuoteAccepted;
 
 class QuoteRequestController extends Controller
 {
@@ -60,10 +63,18 @@ class QuoteRequestController extends Controller
      */
     public function store(Request $request)
     {
+        // Get server upload limits
+        $uploadMaxSize = ini_get('upload_max_filesize');
+        $uploadMaxBytes = $this->parseSize($uploadMaxSize);
+        $maxSizeKB = floor($uploadMaxBytes / 1024);
+        
         $request->validate([
             'title' => 'required|string|max:255',
             'instructions' => 'required|string|max:5000',
-            'files.*' => 'nullable|file|max:10240'
+            'files.*' => 'nullable|file|mimes:jpg,jpeg,png,gif,pdf,ai,eps,svg,psd,zip,rar|max:' . $maxSizeKB
+        ], [
+            'files.*.max' => 'Each file must be no larger than ' . $uploadMaxSize . '. Current server limit: ' . $uploadMaxSize,
+            'files.*.mimes' => 'File must be: jpg, jpeg, png, gif, pdf, ai, eps, svg, psd, zip, or rar'
         ]);
 
         $quoteRequest = new QuoteRequest();
@@ -71,18 +82,38 @@ class QuoteRequestController extends Controller
         $quoteRequest->title = $request->title;
         $quoteRequest->instructions = $request->instructions;
 
-        // Handle file uploads
+        // Handle file uploads with better error handling
         if ($request->hasFile('files')) {
             $uploadedFiles = [];
             
-            foreach ($request->file('files') as $file) {
-                $path = $file->store('quote-files', 'public');
-                $uploadedFiles[] = [
-                    'name' => $file->getClientOriginalName(),
-                    'path' => $path,
-                    'size' => $file->getSize(),
-                    'type' => $file->getMimeType()
-                ];
+            foreach ($request->file('files') as $index => $file) {
+                if ($file->isValid()) {
+                    try {
+                        // Ensure storage directory exists
+                        if (!Storage::disk('public')->exists('quote-files')) {
+                            Storage::disk('public')->makeDirectory('quote-files');
+                        }
+                        
+                        // Generate unique filename to avoid conflicts
+                        $filename = time() . '_' . $index . '_' . $file->getClientOriginalName();
+                        $path = $file->storeAs('quote-files', $filename, 'public');
+                        
+                        if ($path) {
+                            $uploadedFiles[] = [
+                                'name' => $file->getClientOriginalName(),
+                                'path' => $path,
+                                'size' => $file->getSize(),
+                                'type' => $file->getMimeType()
+                            ];
+                        } else {
+                            throw new \Exception("Failed to store file: " . $file->getClientOriginalName());
+                        }
+                    } catch (\Exception $e) {
+                        return back()->withErrors(['files.' . $index => 'Failed to upload file: ' . $file->getClientOriginalName() . '. Error: ' . $e->getMessage()])->withInput();
+                    }
+                } else {
+                    return back()->withErrors(['files.' . $index => 'Invalid file: ' . $file->getClientOriginalName() . '. Please check file size (max: ' . $uploadMaxSize . ')'])->withInput();
+                }
             }
             
             $quoteRequest->files = $uploadedFiles;
@@ -90,8 +121,27 @@ class QuoteRequestController extends Controller
 
         $quoteRequest->save();
 
+        // Notify all admins
+        User::where('is_admin', true)->each(function($admin) use ($quoteRequest){
+            $admin->notify(new AdminQuoteRequested($quoteRequest->id, $quoteRequest->title, $quoteRequest->customer_id));
+        });
+
         return redirect()->route('quote-requests.show', $quoteRequest)
             ->with('success', 'Quote request submitted successfully! You will receive a response within 24 hours.');
+    }
+
+    /**
+     * Parse PHP size string (like "2M", "8M") to bytes
+     */
+    private function parseSize($size) {
+        $unit = preg_replace('/[^bkmgtpezy]/i', '', $size);
+        $size = preg_replace('/[^0-9\.]/', '', $size);
+        
+        if ($unit) {
+            return round($size * pow(1024, stripos('bkmgtpezy', $unit[0])));
+        }
+        
+        return round($size);
     }
 
     /**
@@ -168,6 +218,11 @@ class QuoteRequestController extends Controller
         try {
             $paymentUrl = route('payment.initiate', $quoteRequest);
             \Log::info('Payment URL generated: ' . $paymentUrl);
+
+            // Notify admins of acceptance
+            User::where('is_admin', true)->each(function($admin) use ($quoteRequest){
+                $admin->notify(new AdminQuoteAccepted($quoteRequest->id, $quoteRequest->title, $quoteRequest->customer_id));
+            });
             return redirect($paymentUrl);
         } catch (\Exception $e) {
             \Log::error('Error generating payment route: ' . $e->getMessage());

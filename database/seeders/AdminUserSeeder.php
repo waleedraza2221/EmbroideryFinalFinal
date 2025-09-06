@@ -22,6 +22,10 @@ class AdminUserSeeder extends Seeder
                 'phone' => '1234567890',
                 'password' => Hash::make('password'),
                 'is_admin' => true,
+                'avatar' => 'avatar.png',
+                'active_status' => false,
+                'dark_mode' => false,
+                'messenger_color' => '#2180f3',
             ]
         );
     }

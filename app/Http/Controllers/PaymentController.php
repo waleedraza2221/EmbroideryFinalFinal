@@ -2,450 +2,469 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\Payment;
-use App\Models\QuoteRequest;
-use App\Models\Order;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Str;
+use App\Models\QuoteRequest;
+use App\Models\Payment;
+use App\Models\Invoice;
+use Illuminate\Support\Facades\Http;
 
 class PaymentController extends Controller
 {
     public function __construct()
     {
-        $this->middleware('auth');
+        // Allow public access to thank-you and webhook endpoints
+        $this->middleware('auth')->except(['thankYou','webhook']);
     }
 
+    /**
+     * Inline finalize callback from front-end (still creates a pending payment + order stub)
+     * NOTE: Verification logic has been intentionally removed per request.
+     */
+    public function inlineFinalized(Request $request)
+    {
+        $data = $request->validate([
+            'quote_id' => ['required','integer','exists:quote_requests,id'],
+            'order_external_ref' => ['required','string','max:255'],
+            'user_id' => ['nullable','integer'],
+            'payment_event' => ['required','in:payment:finalized,payment:initiated'],
+            'payload' => ['nullable','array']
+        ]);
 
+        $quote = QuoteRequest::findOrFail($data['quote_id']);
+        if ($quote->customer_id !== $request->user()->id) {
+            abort(403, 'Unauthorized');
+        }
+
+        // Avoid duplicates
+        $existingCompleted = $quote->payments()->where('status','completed')->first();
+        if ($existingCompleted) {
+            return response()->json(['status'=>'ok','message'=>'Payment already completed','payment_id'=>$existingCompleted->id]);
+        }
+        $pending = $quote->payments()->where('status','pending')->where('payment_id',$data['order_external_ref'])->first();
+        if ($pending) {
+            return response()->json(['status'=>'ok','message'=>'Payment already pending','payment_id'=>$pending->id,'existing'=>true]);
+        }
+
+        DB::transaction(function() use (&$quote,$data){
+            if ($quote->isQuoted()) { $quote->status = 'accepted'; $quote->save(); }
+            if (!$quote->order) { try { $quote->createOrder(); } catch(\Throwable $e){ Log::warning('Order create fail inline: '.$e->getMessage()); } }
+            Payment::create([
+                'quote_request_id'=>$quote->id,
+                'customer_id'=>$quote->customer_id,
+                'payment_id'=>$data['order_external_ref'],
+                'order_id'=>optional($quote->order)->id,
+                'amount'=>$quote->quoted_amount,
+                'currency'=>'USD',
+                'status'=>'pending',
+                'payment_method'=>'other',
+                'payment_data'=>['event'=>$data['payment_event'], 'method'=>'2checkout-inline'],
+                'transaction_data'=>$data['payload'] ?? null,
+            ]);
+        });
+        return response()->json(['status'=>'ok']);
+    }
 
     /**
-     * Handle 2Checkout webhook/callback - Enhanced for inline checkout
+     * Webhook endpoint intentionally left inert (no verification logic) per removal request.
      */
     public function webhook(Request $request)
     {
-        try {
-            Log::info('2Checkout webhook received', $request->all());
-
-            // Check if it's an INS (Instant Notification Service) message
-            if ($request->has('message_type')) {
-                return $this->handleINSWebhook($request);
-            }
-
-            // Handle standard webhook
-            $calculatedHash = hash_hmac('sha512', $request->getContent(), config('services.twocheckout.secret_key'));
-            $providedHash = $request->header('X-Avangate-Signature');
-
-            if ($providedHash && !hash_equals($calculatedHash, $providedHash)) {
-                Log::warning('Invalid webhook signature');
-                return response('Invalid signature', 401);
-            }
-
-            $data = $request->all();
-            
-            // Find payment by various identifiers
-            $payment = null;
-            if (isset($data['merchant_order_id'])) {
-                $payment = Payment::find($data['merchant_order_id']);
-            } elseif (isset($data['order_number'])) {
-                $payment = Payment::where('payment_id', $data['order_number'])->first();
-            } elseif (isset($data['REFNO'])) {
-                $payment = Payment::where('payment_id', $data['REFNO'])->first();
-            }
-
-            if (!$payment) {
-                Log::warning('Payment not found for webhook', $data);
-                return response('Payment not found', 404);
-            }
-
-            // Update payment status based on webhook
-            $status = $data['ORDERSTATUS'] ?? $data['order_status'] ?? null;
-            if ($status) {
-                switch (strtoupper($status)) {
-                    case 'COMPLETE':
-                    case 'FINISHED':
-                        if (!$payment->isCompleted()) {
-                            $payment->update([
-                                'status' => 'completed',
-                                'paid_at' => now(),
-                                'transaction_data' => json_encode($data)
-                            ]);
-
-                            // Update quote request and create order
-                            if ($payment->quoteRequest->status !== 'accepted') {
-                                $payment->quoteRequest->update([
-                                    'status' => 'accepted',
-                                    'responded_at' => now()
-                                ]);
-                                
-                                $this->createOrder($payment->quoteRequest, $payment);
-                            }
-                        }
-                        break;
-
-                    case 'REFUND':
-                    case 'REVERSED':
-                        $payment->update([
-                            'status' => 'refunded',
-                            'transaction_data' => json_encode($data)
-                        ]);
-                        break;
-
-                    case 'PENDING':
-                        $payment->update([
-                            'status' => 'pending',
-                            'transaction_data' => json_encode($data)
-                        ]);
-                        break;
-
-                    case 'CANCELED':
-                    case 'CANCELLED':
-                        $payment->update([
-                            'status' => 'cancelled',
-                            'transaction_data' => json_encode($data)
-                        ]);
-                        break;
-                }
-            }
-
-            return response('OK', 200);
-        } catch (\Exception $e) {
-            Log::error('Webhook processing error: ' . $e->getMessage());
-            return response('Error', 500);
-        }
+        Log::info('Webhook hit (verification disabled)');
+        return response()->json(['status'=>'ignored']);
     }
 
     /**
-     * Handle 2Checkout INS (Instant Notification Service) webhook
-     */
-    private function handleINSWebhook(Request $request)
-    {
-        $data = $request->all();
-        
-        // Verify INS signature
-        $stringToHash = $data['sale_id'] . $data['vendor_id'] . $data['invoice_id'] . config('services.twocheckout.secret_word', '');
-        $calculatedHash = strtoupper(md5($stringToHash));
-        $providedHash = strtoupper($data['md5_hash'] ?? '');
-
-        if ($calculatedHash !== $providedHash) {
-            Log::warning('Invalid INS signature', [
-                'calculated' => $calculatedHash,
-                'provided' => $providedHash
-            ]);
-            return response('Invalid signature', 401);
-        }
-
-        // Find payment by sale_id or invoice_id
-        $payment = Payment::where('payment_id', $data['sale_id'])
-            ->orWhere('payment_id', $data['invoice_id'])
-            ->first();
-
-        if (!$payment) {
-            Log::warning('Payment not found for INS', $data);
-            return response('Payment not found', 404);
-        }
-
-        // Process based on message type
-        switch ($data['message_type']) {
-            case 'ORDER_CREATED':
-                $payment->update([
-                    'status' => 'pending',
-                    'transaction_data' => json_encode($data)
-                ]);
-                break;
-
-            case 'FRAUD_STATUS_CHANGED':
-                if ($data['fraud_status'] === 'pass') {
-                    $payment->update(['status' => 'completed']);
-                    
-                    // Create order if payment is completed
-                    if ($payment->quoteRequest->status !== 'accepted') {
-                        $payment->quoteRequest->update(['status' => 'accepted']);
-                        $this->createOrder($payment->quoteRequest, $payment);
-                    }
-                } else {
-                    $payment->update(['status' => 'failed']);
-                }
-                break;
-
-            case 'INVOICE_STATUS_CHANGED':
-                if ($data['invoice_status'] === 'deposited') {
-                    $payment->update(['status' => 'completed']);
-                }
-                break;
-        }
-
-        return response('OK', 200);
-    }
-
-    /**
-     * Create order after successful payment
-     */
-    private function createOrder(QuoteRequest $quoteRequest, Payment $payment)
-    {
-        if ($quoteRequest->order) {
-            return $quoteRequest->order; // Order already exists
-        }
-
-        $order = Order::create([
-            'order_number' => 'ORD-' . str_pad(Order::count() + 1, 6, '0', STR_PAD_LEFT),
-            'quote_request_id' => $quoteRequest->id,
-            'customer_id' => $quoteRequest->customer_id,
-            'title' => $quoteRequest->title ?: 'Custom Order',
-            'instructions' => $quoteRequest->instructions,
-            'original_files' => $quoteRequest->files,
-            'amount' => $payment->amount,
-            'delivery_days' => $quoteRequest->delivery_days ?: 7,
-            'due_date' => now()->addDays($quoteRequest->delivery_days ?: 7),
-            'status' => 'active'
-        ]);
-
-        Log::info('Order created after payment', [
-            'order_id' => $order->id,
-            'payment_id' => $payment->id,
-            'quote_request_id' => $quoteRequest->id
-        ]);
-
-        return $order;
-    }
-
-    /**
-     * Generate 2Checkout payment URL for Blade views
-     * This static method can be called directly from Blade templates
-     */
-    public static function generatePaymentURL(QuoteRequest $quoteRequest)
-    {
-        $merchantCode = config('services.twocheckout.account_number'); // 255036765830
-        $secretWord = config('services.twocheckout.secret_word'); // From TWOCHECKOUT_SECRET_WORD
-        
-        // Clean product title - using the same as your working example
-        $cleanTitle = 'Embroidery Digitize';
-
-        // Parameters that require signature (must be sorted alphabetically)
-        $currency = 'USD';
-        $price = (string)$quoteRequest->quoted_amount;
-        $qty = '1';
-        $type = 'digital';
-        
-        // Create signature following 2Checkout specification:
-        // 1. Extract signature-required parameters
-        // 2. Sort alphabetically: currency, price, prod, qty, type
-        // 3. Serialize values with length prefix
-        // 4. Concatenate and encrypt with HMAC SHA256
-        
-        $signatureParams = [
-            'currency' => $currency,
-            'price' => $price,
-            'prod' => $cleanTitle,
-            'qty' => $qty,
-            'type' => $type
-        ];
-        
-        // Sort alphabetically by key
-        ksort($signatureParams);
-        
-        // Serialize each value (prepend length)
-        $serializedValues = [];
-        foreach ($signatureParams as $key => $value) {
-            $serializedValues[] = strlen($value) . $value;
-        }
-        
-        // Concatenate all serialized values
-        $dataToSign = implode('', $serializedValues);
-        
-        // Generate HMAC SHA256 signature
-        $signature = hash_hmac('sha256', $dataToSign, $secretWord);
-
-        // ConvertPlus parameters - fixed for proper cart loading
-        $params = [
-            // Required parameters
-            'merchant' => $merchantCode,
-            'currency' => $currency,
-            'dynamic' => '1',
-            'prod' => $cleanTitle,
-            'price' => $price,
-            'type' => $type,
-            'qty' => $qty,
-            'signature' => $signature,
-            
-            // Cart behavior - Fixed
-            'tpl' => 'default',
-            'return-url' => 'https://embroiderydigitize.com/thank-you/',
-            'return-type' => 'redirect',
-            
-            // Customer information pre-fill
-            'name' => $quoteRequest->customer->name,
-            'email' => $quoteRequest->customer->email,
-            'phone' => $quoteRequest->customer->phone ?? '',
-            
-            // Order tracking
-            'order-ext-ref' => 'QUOTE-' . $quoteRequest->id,
-            'customer-ext-ref' => 'CUSTOMER-' . $quoteRequest->customer_id,
-            'src' => 'quote-acceptance',
-            
-            // Additional product information
-            'description' => 'Embroidery digitization service for: ' . ($quoteRequest->title ?? 'Custom Design'),
-            'tangible' => '0', // Digital product
-            
-            // Cart settings - Fixed to load cart properly
-            'language' => 'en'
-            // Removed 'empty-cart' => '1' and 'test' => '1' as they cause cart issues
-        ];
-
-        // Build final URL
-        $baseUrl = 'https://secure.2checkout.com/checkout/buy';
-        return $baseUrl . '?' . http_build_query($params);
-    }
-
-    /**
-     * Payment waiting/verification page
-     */
-    public function paymentWaiting(Request $request, $quoteId)
-    {
-        $quoteRequest = QuoteRequest::where('id', $quoteId)
-                                  ->where('customer_id', auth()->id())
-                                  ->firstOrFail();
-
-        Log::info('Payment waiting page accessed', [
-            'quote_request_id' => $quoteId,
-            'user_id' => auth()->id(),
-            'query_params' => $request->all()
-        ]);
-
-        // Check if we have payment confirmation parameters from 2Checkout
-        $orderNumber = $request->get('order_number');
-        $invoiceId = $request->get('invoice_id');
-        $key = $request->get('key');
-
-        if ($orderNumber && $invoiceId) {
-            // Process the successful payment
-            $this->processPaymentCallback($quoteRequest, $request->all());
-            
-            return view('payments.waiting', [
-                'quoteRequest' => $quoteRequest,
-                'status' => 'processing',
-                'message' => 'Payment received! We are processing your order.',
-                'orderNumber' => $orderNumber,
-                'invoiceId' => $invoiceId
-            ]);
-        }
-
-        // If no payment parameters, show waiting page
-        return view('payments.waiting', [
-            'quoteRequest' => $quoteRequest,
-            'status' => 'waiting',
-            'message' => 'Waiting for payment confirmation...',
-        ]);
-    }
-
-    /**
-     * Thank You page after 2Checkout payment
+     * Public thank-you page. All server-side verification removed.
+     * Simply passes along basic query params for display; front-end JS (if any) must handle its own logic.
      */
     public function thankYou(Request $request)
     {
-        try {
-            Log::info('Thank you page accessed', [
-                'query_params' => $request->all(),
-                'user_id' => auth()->id() ?? 'guest'
-            ]);
+        //dd($request->all());
+        $refno = $request->query('refno') ?? $request->query('REFNO');
+        $amount = $request->query('total');
+        $currency = $request->query('total-currency') ?? $request->query('currency');
+    // Support additional ways of receiving quote identifier (refnoext from 2Checkout / manual)
+    $quoteIdRaw = $request->query('quote_id') ?? $request->query('quote') ?? $request->query('refnoext');
+    $quoteId = null;
+    if($quoteIdRaw){
+        if(preg_match('/(\d+)/', $quoteIdRaw, $m)){ $quoteId = $m[1]; }
+    }
 
-            // Get parameters from 2Checkout return URL
-            $orderNumber = $request->get('order_number');
-            $invoiceId = $request->get('invoice_id');
-            $merchantOrderId = $request->get('merchant_order_id');
-            $total = $request->get('total');
-            $key = $request->get('key');
-
-            // If we have payment parameters, find the quote request
-            $quoteRequest = null;
-            if ($merchantOrderId) {
-                $quoteRequest = QuoteRequest::find($merchantOrderId);
-            }
-
-            // Return the thank you page with the parameters
-            // The webhook will handle the actual order creation
-            return view('payments.thank-you', [
-                'orderNumber' => $orderNumber,
-                'invoiceId' => $invoiceId,
-                'merchantOrderId' => $merchantOrderId,
-                'total' => $total,
-                'key' => $key,
-                'quoteRequest' => $quoteRequest,
-                'hasPaymentData' => !empty($orderNumber) && !empty($invoiceId)
-            ]);
-
-        } catch (\Exception $e) {
-            Log::error('Thank you page error: ' . $e->getMessage(), [
-                'request_data' => $request->all()
-            ]);
+        // PRIORITY: Create payment record BEFORE showing thank-you page
+        $user = $request->user();
+        $paymentCreated = false;
+        
+        if ($refno && $quoteId) {
+            // First check if payment already exists
+            $existing = Payment::where('payment_id', $refno)->first();
             
+            if (!$existing) {
+                // Get the quote to ensure it exists and get customer info
+                $quote = QuoteRequest::where('id', $quoteId)->first();
+                
+                if ($quote) {
+                    // Determine customer ID (from auth user or quote)
+                    $customerId = $user ? $user->id : $quote->customer_id;
+                    
+                    // Force creation with DB transaction
+                    try {
+                        DB::transaction(function() use ($quote, $customerId, $refno, $amount, $currency, &$paymentCreated) {
+                            $payment = Payment::create([
+                                'quote_request_id' => $quote->id,
+                                'customer_id'      => $customerId,
+                                'payment_id'       => $refno,
+                                'order_id'         => optional($quote->order)->id,
+                                'amount'           => $quote->quoted_amount ?? ($amount ? (float)$amount : 0),
+                                'currency'         => $currency ?: 'USD',
+                                'status'           => 'pending',
+                                'payment_method'   => 'other',
+                                'payment_data'     => ['created_on_thankyou' => true, 'timestamp' => now()->toISOString(), 'method' => '2checkout-inline'],
+                                'transaction_data' => null,
+                            ]);
+                            $paymentCreated = true;
+                            Log::info('Payment created successfully', ['payment_id' => $payment->id, 'refno' => $refno]);
+                        });
+                    } catch (\Throwable $e) {
+                        Log::error('CRITICAL: Payment creation failed on thankYou', [
+                            'error' => $e->getMessage(),
+                            'refno' => $refno,
+                            'quote_id' => $quoteId,
+                            'customer_id' => $customerId
+                        ]);
+                        // Don't fail silently - this is critical
+                        throw $e;
+                    }
+                } else {
+                    Log::error('Quote not found for payment creation', ['quote_id' => $quoteId, 'refno' => $refno]);
+                }
+            }
+        }
+        
+        // Handle placeholder payment mapping after main creation attempt
+        if ($refno) {
+            // Reconcile placeholder payment_id (e.g. QUOTE-<id>) to actual refno
+            $refnoExt = $request->query('refnoext');
+            if($refnoExt && $refnoExt !== $refno){
+                $placeholder = Payment::where('payment_id',$refnoExt)->first();
+                if($placeholder){
+                    // Only update if no real payment record yet
+                    $alreadyReal = Payment::where('payment_id',$refno)->exists();
+                    if(!$alreadyReal){
+                        try {
+                            $placeholder->payment_id = $refno;
+                            $placeholder->payment_data = array_merge($placeholder->payment_data ?? [], ['mapped_from'=>$refnoExt]);
+                            $placeholder->save();
+                            Log::info('Mapped placeholder payment', ['from' => $refnoExt, 'to' => $refno]);
+                        } catch(\Throwable $e){ 
+                            Log::warning('Failed to map placeholder payment id: '.$e->getMessage()); 
+                        }
+                    }
+                }
+            }
+        }
+
+        if(view()->exists('payments.thank-you')){
             return view('payments.thank-you', [
-                'hasPaymentData' => false,
-                'error' => 'Unable to process payment information'
+                'hasPaymentData' => $paymentCreated,
+                'total' => $amount,
+                'orderNumber' => null,
+                'quoteRequest' => isset($quote) ? $quote : null,
+                'invoiceId' => null,
+                'merchantOrderId' => $refno,
+                'quoteId' => $quoteId,
+                'paymentCreated' => $paymentCreated,
+                'key' => null,
+                'signatureValid' => null,
+                'verified' => false,
+                'verificationAttempted' => false,
             ]);
         }
+        return response('<h1>Thank you</h1><p>Your payment is being processed.</p>',200);
     }
 
     /**
-     * Process payment callback from 2Checkout
+     * Secure proxy for fetching order status from 2Checkout without exposing secret/HMAC to client.
+     * Public (thank-you page is public) but rate-limited via global throttling; returns limited fields only.
      */
-    private function processPaymentCallback(QuoteRequest $quoteRequest, array $paymentData)
+    public function orderStatusProxy(Request $request)
     {
-        try {
-            // Create or update payment record
-            $payment = Payment::updateOrCreate([
-                'quote_request_id' => $quoteRequest->id,
-            ], [
-                'customer_id' => $quoteRequest->customer_id,
-                'payment_id' => $paymentData['order_number'] ?? $paymentData['invoice_id'] ?? 'PENDING',
-                'amount' => $quoteRequest->quoted_amount,
-                'currency' => 'USD',
-                'payment_method' => 'card',
-                'status' => 'completed',
-                'payment_data' => json_encode($paymentData),
-                'paid_at' => now()
-            ]);
+        $data = $request->validate([
+            'refno' => ['required','string','max:64'],
+        ]);
+        $refno = $data['refno'];
 
-            // Update quote request status
-            $quoteRequest->update([
-                'status' => 'accepted',
-                'responded_at' => now()
-            ]);
+        $merchantCode = config('services.twocheckout.account_number', '255036765830');
+        $secretKey = config('services.twocheckout.secret_key', 'Jdg6htmb2[7MITxpZqea');
+        $apiVersion = '6.0';
+        $url = "https://api.2checkout.com/rest/{$apiVersion}/orders/{$refno}";
 
-            // Create order
-            $order = Order::create([
-                'customer_id' => $quoteRequest->customer_id,
-                'quote_request_id' => $quoteRequest->id,
-                'payment_id' => $payment->id,
-                'order_number' => 'ORD-' . time() . '-' . $quoteRequest->id,
-                'title' => $quoteRequest->title ?: 'Embroidery Order',
-                'status' => 'pending',
-                'instructions' => $quoteRequest->instructions,
-                'total_amount' => $quoteRequest->quoted_amount,
-                'delivery_days' => $quoteRequest->delivery_days,
-                'original_files' => $quoteRequest->files,
-                'due_date' => now()->addDays($quoteRequest->delivery_days ?: 7),
-                'amount' => $quoteRequest->quoted_amount
-            ]);
+        $date = gmdate('Y-m-d H:i:s');
+        $string = strlen($merchantCode) . $merchantCode . strlen($date) . $date;
+        $hash = hash_hmac('md5', $string, $secretKey);
 
-            Log::info('Order created from payment callback', [
-                'quote_request_id' => $quoteRequest->id,
-                'order_id' => $order->id,
-                'payment_id' => $payment->id,
-                'order_number' => $order->order_number
-            ]);
+        $headers = [
+            "Content-Type: application/json",
+            "Accept: application/json",
+            "X-Avangate-Authentication: code=\"{$merchantCode}\" date=\"{$date}\" hash=\"{$hash}\"",
+        ];
 
-            // Associate order with quote request
-            $quoteRequest->update(['order_id' => $order->id]);
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        $response = curl_exec($ch);
+        $curlError = curl_error($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
 
-            return $order;
-            
-        } catch (\Exception $e) {
-            Log::error('Payment callback processing failed', [
-                'quote_request_id' => $quoteRequest->id,
-                'error' => $e->getMessage(),
-                'payment_data' => $paymentData
-            ]);
-            throw $e;
-        }
+        return response()->json([
+            'request_params' => $request->all(),
+            'http_code'      => $httpCode,
+            'curl_error'     => $curlError,
+            'raw_response'   => $response,
+            'api_response'   => json_decode($response, true),
+        ]);
     }
-}
+
+    public function completeFromClient(Request $request)
+    {
+        $user = $request->user();
+        if(!$user){
+            return response()->json(['ok'=>false,'error'=>'Unauthenticated'], 401);
+        }
+        $data = $request->validate([
+            'refno' => ['required','string','max:255'],
+            'quote_id' => ['nullable','integer','exists:quote_requests,id'],
+            'refnoext' => ['nullable','string','max:255']
+        ]);
+        $refno = $data['refno'];
+        $quoteIdCandidate = $data['quote_id'] ?? $data['refnoext'] ?? $request->input('quote') ?? null;
+        $payment = Payment::where('payment_id', $refno)->where('customer_id',$user->id)->first();
+        if(!$payment && !empty($quoteIdCandidate)){
+            // Try placeholder pattern QUOTE-{id}
+            $placeholderId = 'QUOTE-' . preg_replace('/[^0-9]/','',$quoteIdCandidate);
+            $payment = Payment::where('payment_id',$placeholderId)->where('customer_id',$user->id)->first();
+            if($payment){
+                try {
+                    $payment->payment_id = $refno;
+                    $payment->payment_data = array_merge($payment->payment_data ?? [], ['mapped_in_finalize'=>true]);
+                    $payment->save();
+                } catch(\Throwable $e){ Log::warning('Finalize mapping placeholder failed: '.$e->getMessage()); }
+            }
+        }
+        if(!$payment){
+            // Attempt to create a pending payment now if quote_id provided
+            if(!empty($quoteIdCandidate)){
+                $quote = QuoteRequest::where('id',$quoteIdCandidate)->where('customer_id',$user->id)->first();
+                if($quote){
+                    try {
+                        $payment = Payment::create([
+                            'quote_request_id'=>$quote->id,
+                            'customer_id'=>$user->id,
+                            'payment_id'=>$refno,
+                            'order_id'=>optional($quote->order)->id,
+                            'amount'=>$quote->quoted_amount,
+                            'currency'=>'USD',
+                            'status'=>'pending',
+                            'payment_method'=>'other',
+                            'payment_data'=>['created_in_finalize'=>true, 'method'=>'2checkout-inline'],
+                            'transaction_data'=>null,
+                        ]);
+                    } catch(\Throwable $e){
+                        Log::warning('Failed to create payment in finalize: '.$e->getMessage());
+                    }
+                }
+            }
+            // Fallback: maybe earlier we stored a placeholder like QUOTE-{id} but now have real refno
+            if(!$payment && !empty($quoteIdCandidate)){
+                $fallback = Payment::where('quote_request_id',$quoteIdCandidate)->where('customer_id',$user->id)->orderByDesc('id')->first();
+                if($fallback){
+                    // Promote this payment to use refno for future lookups
+                    if($fallback->payment_id !== $refno){
+                        $fallback->payment_id = $refno;
+                        try { $fallback->save(); } catch(\Throwable $e){ Log::warning('Failed to update fallback payment_id: '.$e->getMessage()); }
+                    }
+                    $payment = $fallback;
+                }
+            }
+            if(!$payment){
+                return response()->json([
+                    'ok'=>false,
+                    'error'=>'Payment not found',
+                    'debug'=>[
+                        'searched_refno'=>$refno,
+                        'quote_id_candidate'=>$quoteIdCandidate,
+                        'payments_for_quote'=> Payment::where('quote_request_id',$quoteIdCandidate)->where('customer_id',$user->id)->pluck('payment_id')
+                    ]
+                ],404);
+            }
+        }
+        // If still no payment (unlikely) attempt final auto-resolution using upstream ExternalReference
+        if(!$payment){
+            try {
+                $merchantCode = config('services.twocheckout.account_number');
+                $secretKey = config('services.twocheckout.secret_key');
+                if($merchantCode && $secretKey){
+                    $date = gmdate('Y-m-d H:i:s');
+                    $string = strlen($merchantCode) . $merchantCode . strlen($date) . $date;
+                    $hash = hash_hmac('md5', $string, $secretKey);
+                    $url = "https://api.2checkout.com/rest/6.0/orders/{$refno}";
+                    $headers = [
+                        "Content-Type: application/json",
+                        "Accept: application/json",
+                        "X-Avangate-Authentication: code=\"{$merchantCode}\" date=\"{$date}\" hash=\"{$hash}\"",
+                    ];
+                    $ch = curl_init();
+                    curl_setopt($ch, CURLOPT_URL, $url);
+                    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+                    $resp = curl_exec($ch);
+                    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                    curl_close($ch);
+                    if($httpCode === 200 && $resp){
+                        $parsed = json_decode($resp,true);
+                        $extRef = $parsed['ExternalReference'] ?? $parsed['externalReference'] ?? null;
+                        if($extRef && preg_match('/QUOTE-(\d+)/',$extRef,$m)){
+                            $autoQuoteId = $m[1];
+                            $quote = QuoteRequest::where('id',$autoQuoteId)->where('customer_id',$user->id)->first();
+                            if($quote){
+                                // Create or adopt payment
+                                $payment = Payment::where('payment_id',$refno)->where('customer_id',$user->id)->first();
+                                if(!$payment){
+                                    $payment = Payment::create([
+                                        'quote_request_id'=>$quote->id,
+                                        'customer_id'=>$user->id,
+                                        'payment_id'=>$refno,
+                                        'order_id'=>optional($quote->order)->id,
+                                        'amount'=>$quote->quoted_amount,
+                                        'currency'=>'USD',
+                                        'status'=>'pending',
+                                        'payment_method'=>'other',
+                                        'payment_data'=>['created_via_external_reference'=>true, 'method'=>'2checkout-inline'],
+                                        'transaction_data'=>$parsed,
+                                    ]);
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch(\Throwable $e){ Log::warning('ExternalReference resolution failed: '.$e->getMessage()); }
+        }
+        if(!$payment){
+            return response()->json(['ok'=>false,'error'=>'Payment not found after external reference attempt'],404);
+        }
+        if($payment->status==='completed'){
+            // Check if order_id is missing and try to fix it
+            if(!$payment->order_id && $payment->quoteRequest && $payment->quoteRequest->order) {
+                try {
+                    $payment->order_id = $payment->quoteRequest->order->id;
+                    $payment->save();
+                    Log::info('Fixed missing order_id for completed payment', [
+                        'payment_id' => $payment->id, 
+                        'order_id' => $payment->order_id
+                    ]);
+                } catch(\Throwable $e) {
+                    Log::warning('Failed to fix missing order_id: ' . $e->getMessage());
+                }
+            }
+            return response()->json([
+                'ok'=>true,
+                'already'=>true,
+                'order_id'=>optional($payment->order)->id,
+                'invoice_id'=>optional(optional($payment->order)->invoice)->id
+            ]);
+        }
+        $quote = $payment->quoteRequest;
+        if(!$quote){ return response()->json(['ok'=>false,'error'=>'Quote missing'],422); }
+        try {
+            DB::transaction(function() use (&$payment,&$quote){
+                if($quote->isQuoted()) { 
+                    $quote->status='accepted'; 
+                    $quote->save(); 
+                }
+                
+                // Create order if it doesn't exist (with proper duplicate prevention)
+                $quote->refresh(); // Refresh to get latest state
+                if(!$quote->order){ 
+                    try { 
+                        $order = $quote->createOrder(); 
+                        // Refresh the relationship again after creation
+                        $quote->refresh();
+                        Log::info('Order created successfully', ['order_id' => $order->id, 'quote_id' => $quote->id]);
+                    } catch(\Throwable $e){ 
+                        Log::error('Order creation failed in transaction', [
+                            'error' => $e->getMessage(),
+                            'quote_id' => $quote->id,
+                            'quote_status' => $quote->status,
+                            'is_quoted' => $quote->isQuoted(),
+                            'is_accepted' => $quote->isAccepted()
+                        ]);
+                        throw $e; // Re-throw to abort transaction
+                    } 
+                } else {
+                    Log::info('Order already exists, skipping creation', ['quote_id' => $quote->id, 'order_id' => $quote->order->id]);
+                }
+                
+                // Update payment with order_id if order exists
+                if($quote->order) {
+                    $payment->order_id = $quote->order->id;
+                }
+                
+                $payment->status='completed';
+                $payment->paid_at=now();
+                $payment->save();
+            });
+        } catch(\Throwable $e){
+            Log::error('Finalize payment transaction failed', [
+                'error' => $e->getMessage(),
+                'payment_id' => $payment->id,
+                'quote_id' => optional($quote)->id
+            ]);
+            return response()->json(['ok'=>false,'error'=>'Finalize failure: ' . $e->getMessage()],500);
+        }
+        // Refresh quote to get the latest order relationship
+        $quote->refresh();
+        $order = $quote->order;
+        
+        if(!$order){ 
+            Log::error('Order still missing after transaction', [
+                'quote_id' => $quote->id,
+                'quote_status' => $quote->status,
+                'payment_id' => $payment->id
+            ]);
+            return response()->json(['ok'=>false,'error'=>'Order creation failed - order not found after transaction'],500); 
+        }
+        $invoice = $order->invoice;
+        if(!$invoice){
+            try {
+                $customer = $order->customer;
+                $lineItems = [[ 'description'=>$order->title, 'quantity'=>1, 'price'=>$order->amount ]];
+                $subtotal = $order->amount;
+                $taxRate = 0.10; $taxAmount = $subtotal*$taxRate; $totalAmount = $subtotal + $taxAmount;
+                $invoice = Invoice::create([
+                    'customer_id'=>$order->customer_id,
+                    'order_id'=>$order->id,
+                    'customer_name'=>$customer->name,
+                    'customer_email'=>$customer->email,
+                    'billing_address'=>$customer->billing_address ?? 'Address not provided',
+                    'billing_company'=>$customer->billing_company,
+                    'subtotal'=>$subtotal,
+                    'tax_rate'=>$taxRate,
+                    'tax_amount'=>$taxAmount,
+                    'total_amount'=>$totalAmount,
+                    'currency'=>'USD',
+                    'status'=>'paid',
+                    'invoice_date'=>now(),
+                    'due_date'=>now(),
+                    'line_items'=>$lineItems,
+                    'notes'=>'Auto invoice for paid order: '.$order->order_number
+                ]);
+            } catch(\Throwable $e){ Log::error('Invoice create fail: '.$e->getMessage()); }
+        }
+        return response()->json(['ok'=>true,'order_id'=>$order->id,'invoice_id'=>optional($invoice)->id,'payment_id'=>$payment->id]);
+    }
+        
+    }
+

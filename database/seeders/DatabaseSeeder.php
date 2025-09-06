@@ -24,9 +24,16 @@ class DatabaseSeeder extends Seeder
             'phone' => '9876543210',
             'password' => Hash::make('password'),
             'is_admin' => false,
+            'avatar' => 'avatar.png',
+            'active_status' => false,
+            'dark_mode' => false,
+            'messenger_color' => '#2180f3',
         ]);
 
         // Uncomment below to create more test users if needed
         // User::factory(10)->create();
+
+    // Seed testimonials
+    $this->call(\Database\Seeders\TestimonialSeeder::class);
     }
 }

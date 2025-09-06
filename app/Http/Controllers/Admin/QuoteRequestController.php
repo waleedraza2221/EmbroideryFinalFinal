@@ -7,6 +7,7 @@ use App\Models\QuoteRequest;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use App\Notifications\CustomerQuoteProvided;
 
 class QuoteRequestController extends Controller
 {
@@ -60,6 +61,17 @@ class QuoteRequestController extends Controller
             'status' => 'quoted',
             'quoted_at' => now()
         ]);
+
+        // Notify customer
+        $customer = $quoteRequest->customer; 
+        if($customer){
+            $customer->notify(new CustomerQuoteProvided(
+                $quoteRequest->id,
+                $quoteRequest->title,
+                (string) $quoteRequest->quoted_amount,
+                (string) $quoteRequest->delivery_days
+            ));
+        }
 
         return redirect()->route('admin.quote-requests.show', $quoteRequest)
             ->with('success', 'Quote sent successfully! Customer will be notified.');
